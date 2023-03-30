@@ -1,0 +1,148 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{9BDA9D32-E9A1-4DB8-9D90-443792107E28}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>TrustedUninstaller.Shared</RootNamespace>
+    <AssemblyName>TrustedUninstaller.Shared</AssemblyName>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <LangVersion>8</LangVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+    <TargetFrameworkProfile />
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
+    <DebugSymbols>true</DebugSymbols>
+    <OutputPath>bin\x64\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x64</PlatformTarget>
+    <ErrorReport>prompt</ErrorReport>
+    <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
+    <OutputPath>bin\x64\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>embedded</DebugType>
+    <PlatformTarget>x64</PlatformTarget>
+    <ErrorReport>prompt</ErrorReport>
+    <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="PresentationFramework" />
+    <Reference Include="System" />
+    <Reference Include="System.ComponentModel.Composition" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.DirectoryServices" />
+    <Reference Include="System.DirectoryServices.AccountManagement" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.IO.Compression, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
+      <Private>True</Private>
+    </Reference>
+    <Reference Include="System.Management" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.ServiceProcess" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Xml" />
+    <Reference Include="Windows">
+      <HintPath>bin\Debug\Windows.winmd</HintPath>
+      <Private>True</Private>
+      <EmbedInteropTypes>False</EmbedInteropTypes>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Actions\RegistryValueAction.cs" />
+    <Compile Include="Actions\SystemPackageAction.cs" />
+    <Compile Include="Actions\TaskKillAction.cs" />
+    <Compile Include="Actions\ScheduledTaskAction.cs" />
+    <Compile Include="Actions\LineInFileAction.cs" />
+    <Compile Include="Actions\CmdAction.cs" />
+    <Compile Include="Actions\ShortcutAction.cs" />
+    <Compile Include="Actions\PowerShellAction.cs" />
+    <Compile Include="Actions\RunAction.cs" />
+    <Compile Include="Actions\FileAction.cs" />
+    <Compile Include="Actions\AppxAction.cs" />
+    <Compile Include="Actions\LanguageAction.cs" />
+    <Compile Include="Actions\RegistryKeyAction.cs" />
+    <Compile Include="Actions\ServiceAction.cs" />
+    <Compile Include="Actions\UpdateAction.cs" />
+    <Compile Include="Actions\UserAction.cs" />
+    <Compile Include="Actions\WriteStatusAction.cs" />
+    <Compile Include="AmeliorationUtil.cs" />
+    <Compile Include="DualOut.cs" />
+    <Compile Include="Globals.cs" />
+    <Compile Include="Playbook.cs" />
+    <Compile Include="ProviderStatus.cs" />
+    <Compile Include="ErrorLogger.cs" />
+    <Compile Include="Exceptions\InvalidRegistryEntryException.cs" />
+    <Compile Include="Exceptions\TaskInProgressException.cs" />
+    <Compile Include="NativeProcess.cs" />
+    <Compile Include="Parser\ConfigParser.cs" />
+    <Compile Include="Parser\TaskActionResolver.cs" />
+    <Compile Include="Predicates\IPredicate.cs" />
+    <Compile Include="Requirements.cs" />
+    <Compile Include="Tasks\UninstallTaskPrivilege.cs" />
+    <Compile Include="Tasks\ITaskAction.cs" />
+    <Compile Include="Tasks\UninstallTaskStatus.cs" />
+    <Compile Include="Tasks\UninstallTask.cs" />
+    <Compile Include="WinUtil.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <COMReference Include="IWshRuntimeLibrary">
+      <Guid>{F935DC20-1CF0-11D0-ADB9-00C04FD58A0B}</Guid>
+      <VersionMajor>1</VersionMajor>
+      <VersionMinor>0</VersionMinor>
+      <Lcid>0</Lcid>
+      <WrapperTool>tlbimp</WrapperTool>
+      <Isolated>False</Isolated>
+      <EmbedInteropTypes>True</EmbedInteropTypes>
+    </COMReference>
+  </ItemGroup>
+  <ItemGroup>
+    <WCFMetadata Include="Connected Services\" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.PowerShell.5.ReferenceAssemblies" Version="1.1.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+    <PackageReference Include="System.IO" Version="4.3.0" />
+    <PackageReference Include="System.IO.FileSystem" Version="4.3.0" />
+    <PackageReference Include="System.IO.FileSystem.Primitives" Version="4.3.0" />
+    <PackageReference Include="System.Runtime" Version="4.3.0" />
+    <PackageReference Include="System.Security.Cryptography.Algorithms" Version="4.3.1" />
+    <PackageReference Include="System.Security.Cryptography.Encoding" Version="4.3.0" />
+    <PackageReference Include="System.Security.Cryptography.Primitives" Version="4.3.0" />
+    <PackageReference Include="System.Security.Cryptography.X509Certificates" Version="4.3.0" />
+    <PackageReference Include="System.Security.Principal.Windows" Version="5.0.0" />
+    <PackageReference Include="TaskScheduler" Version="2.10.1" />
+    <PackageReference Include="YamlDotNet" Version="11.2.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Properties\UsrClass.dat" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+  <PropertyGroup>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+  <PropertyGroup>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' != 'Single File|x64' ">
+    <PostBuildEvent>for /f "usebackq delims=" %%A in (`DIR /B /S /A:d "$(SolutionDir)" ^| FINDSTR /R /c:".*\\bin\\.*\\de$" /c:".*\\bin\\.*\\en$" /c:".*\\bin\\.*\\es$" /c:".*\\bin\\.*\\fr$" /c:".*\\bin\\.*\\it$" /c:".*\\bin\\.*\\ja$" /c:".*\\bin\\.*\\ko$" /c:".*\\bin\\.*\\ru$" /c:".*\\bin\\.*\\zh-Hans$" /c:".*\\bin\\.*\\zh-Hant$" /c:".*\\bin\\.*\\pl$" /c:".*\\bin\\.*\\zh-CN$"`) do (RMDIR /Q /S "%%A" &amp; cmd /c "exit /b 0")</PostBuildEvent>
+  </PropertyGroup>
+</Project>
