@@ -1,4 +1,4 @@
-# TrustedUninstaller CLI
+# AME Wizard CLI
 
 CLI tool for running Playbooks.
 
