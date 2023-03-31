@@ -1,9 +1,11 @@
 ﻿using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Windows;
 using TrustedUninstaller.Shared;
+using TrustedUninstaller.Shared.Actions;
 
 namespace TrustedUninstaller.CLI
 {
@@ -55,6 +57,44 @@ namespace TrustedUninstaller.CLI
             }
             
             ExtractResourceFolder("resources", Directory.GetCurrentDirectory());
+
+            if (!WinUtil.IsTrustedInstaller())
+            {
+                Console.WriteLine("Checking requirements...\r\n");
+                if (AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.Internet) && !await (new Requirements.Internet()).IsMet())
+                {
+                    Console.WriteLine("Internet must be connected to run this Playbook.");
+                }
+            
+                if (AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.DefenderDisabled) && Process.GetProcessesByName("MsMpEng").Any())
+                {
+                    Console.WriteLine("The system must be prepared before continuing. Make sure all 4 windows security toggles are set to off.\r\nYour system will restart after preparation\r\nPress any key to continue...");
+                    Console.ReadKey();
+                    try
+                    {
+                        WinUtil.PrepareSystemCLI();
+                        CmdAction reboot = new CmdAction()
+                        {
+                            Command = "timeout /t 1 & shutdown /r /t 0",
+                            Wait = false
+                        };
+
+                        AmeliorationUtil.SafeRunAction(reboot).Wait();
+
+                        Environment.Exit(0);
+                    } catch (Exception e)
+                    {
+                        Console.WriteLine("Error preparing system: " + e.Message);
+                        Environment.Exit(-1);
+                    }
+                }
+                if (AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.Internet) && !await (new Requirements.Internet()).IsMet())
+                {
+                    Console.WriteLine("Internet must be connected to run this Playbook.");
+                
+                }
+            }
+            
             
             await AmeliorationUtil.StartAmelioration();
             

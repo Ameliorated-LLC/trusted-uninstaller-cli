@@ -173,7 +173,7 @@ namespace TrustedUninstaller.Shared
                 select g).FirstOrDefault();
             return msAccount == null ? Environment.UserName : msAccount.Substring(@"MicrosoftAccount\".Length);
         }
-        
+
         public static bool IsLocalAccount()
         {
             var wi = WindowsIdentity.GetCurrent();
@@ -190,14 +190,15 @@ namespace TrustedUninstaller.Shared
         public enum SL_GENUINE_STATE
         {
             SL_GEN_STATE_IS_GENUINE = 0,
+
             // SL_GEN_STATE_INVALID_LICENSE = 1,
             // SL_GEN_STATE_TAMPERED = 2,
             SL_GEN_STATE_LAST = 3
         }
-        
+
         [DllImport("Slwga.dll", EntryPoint = "SLIsGenuineLocal", CharSet = CharSet.None, ExactSpelling =
- false, SetLastError = false, PreserveSig = true, CallingConvention = CallingConvention.Winapi, BestFitMapping =
- false, ThrowOnUnmappableChar = false)]
+            false, SetLastError = false, PreserveSig = true, CallingConvention = CallingConvention.Winapi, BestFitMapping =
+            false, ThrowOnUnmappableChar = false)]
         [PreserveSigAttribute()]
         internal static extern uint SLIsGenuineLocal(ref SLID slid, [In, Out] ref SL_GENUINE_STATE genuineState, IntPtr val3);
 
@@ -205,7 +206,7 @@ namespace TrustedUninstaller.Shared
         {
             // Microsoft-Windows-Security-SPP GUID
             // http://technet.microsoft.com/en-us/library/dd772270.aspx
-            var windowsSlid = new SLID("55c92734-d682-4d71-983e-d6ec3f16059f"); 
+            var windowsSlid = new SLID("55c92734-d682-4d71-983e-d6ec3f16059f");
             var genuineState = SL_GENUINE_STATE.SL_GEN_STATE_LAST;
             var resultInt = SLIsGenuineLocal(ref windowsSlid, ref genuineState, IntPtr.Zero);
 #if DEBUG
@@ -213,21 +214,20 @@ namespace TrustedUninstaller.Shared
 #else
             return resultInt == 0 && genuineState == SL_GENUINE_STATE.SL_GEN_STATE_IS_GENUINE;
 #endif
-            
         }
 
         private static IEnumerable<string> GetWindowsGroups(WindowsIdentity id)
         {
             var irc = id.Groups ?? new IdentityReferenceCollection();
-            return irc.Select(ir => (NTAccount) ir.Translate(typeof(NTAccount))).Select(acc => acc.Value).ToList();
+            return irc.Select(ir => (NTAccount)ir.Translate(typeof(NTAccount))).Select(acc => acc.Value).ToList();
         }
 
         public static bool HasWindowsGroup(string groupName)
         {
             var appDomain = Thread.GetDomain();
             appDomain.SetPrincipalPolicy(PrincipalPolicy.WindowsPrincipal);
-            var currentPrincipal = (WindowsPrincipal) Thread.CurrentPrincipal;
-            var groups = GetWindowsGroups((WindowsIdentity) currentPrincipal.Identity);
+            var currentPrincipal = (WindowsPrincipal)Thread.CurrentPrincipal;
+            var groups = GetWindowsGroups((WindowsIdentity)currentPrincipal.Identity);
             return groups.Any(group => group == groupName);
         }
 
@@ -332,7 +332,7 @@ namespace TrustedUninstaller.Shared
                 var nError = Marshal.GetLastWin32Error();
                 var win32Exception = new Win32Exception(nError);
                 throw new ExternalException("Could not change service start type: "
-                    + win32Exception.Message);
+                                            + win32Exception.Message);
             }
 
             CloseServiceHandle(serviceHandle);
@@ -462,15 +462,16 @@ namespace TrustedUninstaller.Shared
                                 processes.Add(Process.GetProcessById(processInfo[i].Process.dwProcessId));
                             }
                             // catch the error -- in case the process is no longer running
-                            catch (ArgumentException) { }
+                            catch (ArgumentException)
+                            {
+                            }
                         }
                     }
                     else throw new Exception("Could not list processes locking resource.");
                 }
                 else if (res != 0)
                     throw new Exception("Could not list processes locking resource. Could not get size of result." + $" Result value: {res}");
-            }
-            finally
+            } finally
             {
                 RmEndSession(handle);
             }
@@ -499,7 +500,7 @@ namespace TrustedUninstaller.Shared
                 var svc = new ServiceController("Winmgmt");
                 ChangeStartMode(svc, ServiceStartMode.Automatic);
             }
-            
+
             List<ProviderStatus> avList = new List<ProviderStatus>();
             string computer = Environment.MachineName;
             string wmipath = @"\\" + computer + @"\root\SecurityCenter2";
@@ -559,8 +560,7 @@ namespace TrustedUninstaller.Shared
                         avList.Add(av);
                     }
                 }
-            }
-            catch (Exception e)
+            } catch (Exception e)
             {
                 ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while retrieving the AV list.");
             }
@@ -586,6 +586,7 @@ namespace TrustedUninstaller.Shared
                         {
                             continue;
                         }
+
                         if (Environment.Is64BitOperatingSystem)
                         {
                             if (Regex.IsMatch(value, @"C\+\+ 2015.*\((x64|x86)\)"))
@@ -603,8 +604,10 @@ namespace TrustedUninstaller.Shared
                     }
                 }
             }
+
             return false;
         }
+
         public static async Task RemoveProtectionAsync()
         {
             var cmdAction = new CmdAction();
@@ -616,8 +619,7 @@ namespace TrustedUninstaller.Shared
                     //Install Visual C++ 2015 redistributable package silently
                     cmdAction.Command = "vc_redist.x64.exe /q /norestart";
                     await cmdAction.RunTask();
-                }
-                catch (Exception e)
+                } catch (Exception e)
                 {
                     ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while installing VC 15.");
                     throw;
@@ -631,27 +633,26 @@ namespace TrustedUninstaller.Shared
                     ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -installkph"
                     : $"ProcessHacker\\x86\\ProcessHacker.exe -s -installkph";
                 var res = await cmdAction.RunTask();
-
-            }
-            catch (Exception e)
+            } catch (Exception e)
             {
                 ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "ProcessHacker ran into an error while installing its driver.");
                 throw;
             }
-
         }
 
         private const int GWL_STYLE = -16;
         private const int WS_SYSMENU = 0x80000;
+
         [DllImport("user32.dll", SetLastError = true)]
         private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
         [DllImport("user32.dll")]
         private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
         //public static void RemoveCloseButton(Window window)
         //{
-            //var hwnd = new WindowInteropHelper(window).Handle;
-            //SetWindowLong(hwnd, GWL_STYLE, GetWindowLong(hwnd, GWL_STYLE) & ~WS_SYSMENU);
+        //var hwnd = new WindowInteropHelper(window).Handle;
+        //SetWindowLong(hwnd, GWL_STYLE, GetWindowLong(hwnd, GWL_STYLE) & ~WS_SYSMENU);
         //}
 
         public static bool IsVM()
@@ -674,15 +675,95 @@ namespace TrustedUninstaller.Shared
                         }
                     }
                 }
+
                 return false;
-            }
-            catch (Exception e)
+            } catch (Exception e)
             {
                 ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while checking if running system is a VM.");
                 return false;
             }
         }
 
+        public static void PrepareSystemCLI()
+        {
+            try
+            {
+                var defenderStop = new RunAction()
+                {
+                    RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                    Exe = $"NSudoLC.exe",
+                    Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait cmd /c \"" +
+                                "sc sdset \"WinDefend\" \"D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWRPLOCRRC;;;BA)(A;;CCLCSWRPLOCRRC;;;BU)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWRPLOCRRC;;;SU)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)\"&" +
+                                "sc config WinDefend start=disabled&" +
+                                "net stop WinDefend\"",
+                    CreateWindow = false,
+                    Timeout = 7500,
+                };
+                defenderStop.RunTask().Wait();
+            } catch (Exception e)
+            {
+            }
+
+            var defenderValues = new RunAction()
+            {
+                RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                Exe = $"NSudoLC.exe",
+                Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait cmd /c \"reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"ProductAppDataPath\" /f &" +
+                            " reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"InstallLocation\" /f\"",
+                CreateWindow = false
+            };
+            defenderValues.RunTask().Wait();
+
+            var defenderKey = Registry.LocalMachine.OpenSubKey("SOFTWARE\\Microsoft\\Windows Defender");
+            if (defenderKey != null && defenderKey.GetValueNames().Contains("InstallLocation"))
+            {
+                throw new Exception("Could not remove defender install values.");
+            }
+
+            var defenderService = new RunAction()
+            {
+                RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                Exe = $"NSudoLC.exe",
+                Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend\" /f",
+                CreateWindow = false
+            };
+            defenderService.RunTask().Wait();
+
+            if (Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Services\\WinDefend") != null)
+            {
+                throw new Exception("Could not remove WinDefend service.");
+            }
+
+            // MpOAV.dll normally in use by a lot of processes. This prevents that.
+            var MpOAVCLSID = new RunAction()
+            {
+                RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                Exe = $"NSudoLC.exe",
+                Arguments = @"-U:T -P:E -M:S -Priority:RealTime -ShowWindowMode:Hide -Wait reg delete ""HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32"" /f",
+                CreateWindow = false
+            };
+            MpOAVCLSID.RunTask().Wait();
+
+            if (Registry.ClassesRoot.OpenSubKey(@"CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32") != null)
+            {
+                throw new Exception("Could not remove MpOAV mapping.");
+            }
+
+            // Can cause ProcessHacker driver warnings without this
+            AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+            {
+                KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
+                Value = "Enabled",
+                Data = 0,
+            }).Wait();
+            AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+            {
+                KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config",
+                Value = "VulnerableDriverBlocklistEnable",
+                Data = 0,
+            }).Wait();
+        }
+        
         public static async Task UninstallDriver()
         {
             CmdAction cmdAction = new CmdAction();

@@ -184,5 +184,8 @@
     <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---WindowExplorer.dll" />
     <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---ProcessHacker.exe" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Properties\resources\NSudoLC.exe" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
