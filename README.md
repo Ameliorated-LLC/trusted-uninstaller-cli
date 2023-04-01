@@ -12,7 +12,7 @@ See our [CLI guide](hgttps:/d) for detailed instructions.
 	
     git clone https://git.ameliorated.info/Styris/trusted-uninstaller-cli.git
 
-2. Open TrustedUninstaller.sln with Visual Studo or JetBrains Rider
+2. Open TrustedUninstaller.sln with Visual Studio or JetBrains Rider
 
 3. Set the configuration to **Release**
 
