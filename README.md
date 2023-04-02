@@ -1,10 +1,10 @@
-# AME Wizard CLI
+# AME Wizard Core
 
-CLI tool for running Playbooks.
+Core functionality used by AME Wizard.
 
-## Usage
+## CLI Usage
 
-See our [CLI guide](hgttps:/d) for detailed instructions.
+Coming soon.
 
 ## Compilation
 
