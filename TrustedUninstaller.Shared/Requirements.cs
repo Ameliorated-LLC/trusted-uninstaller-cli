@@ -35,7 +35,12 @@ namespace TrustedUninstaller.Shared
             [XmlEnum("Activation")]
             Activation = 5,
             [XmlEnum("NoAntivirus")]
-            NoAntivirus = 6
+            NoAntivirus = 6,
+            [XmlEnum("PasswordSet")]
+            PasswordSet = 7,
+            [XmlEnum("AdministratorPasswordSet")]
+            AdministratorPasswordSet = 8,
+            
         }
 
         public static async Task<Requirement[]> MetRequirements(this Requirement[] requirements)
@@ -66,7 +71,13 @@ namespace TrustedUninstaller.Shared
             
             if (requirements.Contains (Requirement.DefenderToggled))
                 if (await new DefenderDisabled().IsMet()) metRequirements.Add(Requirement.DefenderToggled);
+            
+            if (requirements.Contains(Requirement.PasswordSet))
+                metRequirements.Add(Requirement.PasswordSet);
 
+            if (requirements.Contains(Requirement.AdministratorPasswordSet))
+                metRequirements.Add(Requirement.AdministratorPasswordSet);
+                
             return metRequirements.ToArray();
         }
         

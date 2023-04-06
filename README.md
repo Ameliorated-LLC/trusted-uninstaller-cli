@@ -18,8 +18,10 @@ Coming soon.
 
 4. Build TrustedUninstaller.CLI
 
+If you run into reference issues with the Windows namespace, add `Windows.winmd` as a reference.
+
 ## License
 This tool has an [MIT license](https://en.wikipedia.org/wiki/MIT_License), which waives any requirements or rules governing the source code’s use, removing politics from the equation.
 
-Since this project makes major alterations to the operating system and has the ability to install software during this process, it is imperative that we **provide its source code for auditing purposes.**  
+Since this project makes major alterations to the operating system and has the ability to install software during this process, it is imperative that we **provide its source code for auditing purposes.**  
 This has not only helped us build trust, and make our project stand out among the crowd, but has also led to many community contributions along the way.
