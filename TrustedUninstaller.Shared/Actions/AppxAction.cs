@@ -1,8 +1,6 @@
 ﻿using System;
 using System.Linq;
 using System.Threading.Tasks;
-using Windows.ApplicationModel;
-using Windows.Management.Deployment;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Serialization;
@@ -13,7 +11,6 @@ using System.Threading;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    // Integrate ame-assassin later
     internal class AppxAction : ITaskAction
     {
         public enum AppxOperation
@@ -48,12 +45,14 @@ namespace TrustedUninstaller.Shared.Actions
 
         public string ErrorString() => $"AppxAction failed to remove '{Name}'.";
         
+        /*
         private Package GetPackage()
         {
             var packageManager = new PackageManager();
 
             return packageManager.FindPackages().FirstOrDefault(package => package.Id.Name == Name);
         }
+        */
         public UninstallTaskStatus GetStatus()
         {
             if (InProgress) return UninstallTaskStatus.InProgress;

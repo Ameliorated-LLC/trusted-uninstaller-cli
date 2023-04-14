@@ -110,10 +110,12 @@ namespace TrustedUninstaller.Shared.Actions
             return Operation switch
             {
                 ServiceOperation.Stop =>
+                    serviceController == null ||
                     serviceController?.Status == ServiceControllerStatus.Stopped
                     || serviceController?.Status == ServiceControllerStatus.StopPending ?
                         UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo,
                 ServiceOperation.Continue =>
+                    serviceController == null ||
                     serviceController?.Status == ServiceControllerStatus.Running
                     || serviceController?.Status == ServiceControllerStatus.ContinuePending ?
                         UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo,
@@ -122,6 +124,7 @@ namespace TrustedUninstaller.Shared.Actions
                     || serviceController?.Status == ServiceControllerStatus.Running ?
                         UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo,
                 ServiceOperation.Pause =>
+                    serviceController == null ||
                     serviceController?.Status == ServiceControllerStatus.Paused
                     || serviceController?.Status == ServiceControllerStatus.PausePending ?
                         UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo,
