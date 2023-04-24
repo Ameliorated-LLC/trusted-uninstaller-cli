@@ -332,7 +332,7 @@ namespace TrustedUninstaller.Shared
                 var nError = Marshal.GetLastWin32Error();
                 var win32Exception = new Win32Exception(nError);
                 throw new ExternalException("Could not change service start type: "
-                                            + win32Exception.Message);
+                    + win32Exception.Message);
             }
 
             CloseServiceHandle(serviceHandle);
@@ -462,16 +462,15 @@ namespace TrustedUninstaller.Shared
                                 processes.Add(Process.GetProcessById(processInfo[i].Process.dwProcessId));
                             }
                             // catch the error -- in case the process is no longer running
-                            catch (ArgumentException)
-                            {
-                            }
+                            catch (ArgumentException) { }
                         }
                     }
                     else throw new Exception("Could not list processes locking resource.");
                 }
                 else if (res != 0)
                     throw new Exception("Could not list processes locking resource. Could not get size of result." + $" Result value: {res}");
-            } finally
+            }
+            finally
             {
                 RmEndSession(handle);
             }
@@ -500,7 +499,7 @@ namespace TrustedUninstaller.Shared
                 var svc = new ServiceController("Winmgmt");
                 ChangeStartMode(svc, ServiceStartMode.Automatic);
             }
-
+            
             List<ProviderStatus> avList = new List<ProviderStatus>();
             string computer = Environment.MachineName;
             string wmipath = @"\\" + computer + @"\root\SecurityCenter2";
@@ -560,7 +559,8 @@ namespace TrustedUninstaller.Shared
                         avList.Add(av);
                     }
                 }
-            } catch (Exception e)
+            }
+            catch (Exception e)
             {
                 ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while retrieving the AV list.");
             }
@@ -586,7 +586,6 @@ namespace TrustedUninstaller.Shared
                         {
                             continue;
                         }
-
                         if (Environment.Is64BitOperatingSystem)
                         {
                             if (Regex.IsMatch(value, @"C\+\+ 2015.*\((x64|x86)\)"))
@@ -604,10 +603,8 @@ namespace TrustedUninstaller.Shared
                     }
                 }
             }
-
             return false;
         }
-
         public static async Task RemoveProtectionAsync()
         {
             var cmdAction = new CmdAction();
@@ -619,7 +616,8 @@ namespace TrustedUninstaller.Shared
                     //Install Visual C++ 2015 redistributable package silently
                     cmdAction.Command = "vc_redist.x64.exe /q /norestart";
                     await cmdAction.RunTask();
-                } catch (Exception e)
+                }
+                catch (Exception e)
                 {
                     ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while installing VC 15.");
                     throw;
@@ -633,26 +631,27 @@ namespace TrustedUninstaller.Shared
                     ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -installkph"
                     : $"ProcessHacker\\x86\\ProcessHacker.exe -s -installkph";
                 var res = await cmdAction.RunTask();
-            } catch (Exception e)
+
+            }
+            catch (Exception e)
             {
                 ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "ProcessHacker ran into an error while installing its driver.");
                 throw;
             }
+
         }
 
         private const int GWL_STYLE = -16;
         private const int WS_SYSMENU = 0x80000;
-
         [DllImport("user32.dll", SetLastError = true)]
         private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
-
         [DllImport("user32.dll")]
         private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
         //public static void RemoveCloseButton(Window window)
         //{
-        //var hwnd = new WindowInteropHelper(window).Handle;
-        //SetWindowLong(hwnd, GWL_STYLE, GetWindowLong(hwnd, GWL_STYLE) & ~WS_SYSMENU);
+            //var hwnd = new WindowInteropHelper(window).Handle;
+            //SetWindowLong(hwnd, GWL_STYLE, GetWindowLong(hwnd, GWL_STYLE) & ~WS_SYSMENU);
         //}
 
         public static bool IsVM()
@@ -675,15 +674,15 @@ namespace TrustedUninstaller.Shared
                         }
                     }
                 }
-
                 return false;
-            } catch (Exception e)
+            }
+            catch (Exception e)
             {
                 ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while checking if running system is a VM.");
                 return false;
             }
         }
-
+        
         public static void PrepareSystemCLI()
         {
             try
@@ -781,6 +780,8 @@ namespace TrustedUninstaller.Shared
                 throw;
             }
         }
+        
+        
         
         public class RegistryManager
         {

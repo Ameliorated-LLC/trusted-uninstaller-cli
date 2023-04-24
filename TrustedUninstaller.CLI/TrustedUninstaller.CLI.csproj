@@ -33,7 +33,9 @@
     <PublishWizardCompleted>true</PublishWizardCompleted>
     <BootstrapperEnabled>true</BootstrapperEnabled>
   </PropertyGroup>
-  <PropertyGroup />
+  <PropertyGroup>
+    <PathMap>$([System.IO.Path]::GetFullPath('$(SolutionDir)'))=./</PathMap>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Debug|x64'">
     <DebugSymbols>true</DebugSymbols>
     <OutputPath>bin\x64\Debug\</OutputPath>
@@ -113,7 +115,6 @@
   <ItemGroup>
     <None Include="App.config" />
     <None Include="app.manifest" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---ame-assassin.exe.config" />
   </ItemGroup>
   <ItemGroup>
     <BootstrapperPackage Include=".NETFramework,Version=v4.8">
@@ -149,46 +150,10 @@
     <PackageReference Include="System.Security.Principal.Windows" Version="5.0.0" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="Properties\resources\ame-assassin---ame-assassin.exe" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---assassin-helper.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---assassin-helper.exe" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---e_sqlite3.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---Microsoft.Data.Sqlite.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---Microsoft.Win32.Registry.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---Microsoft.Win32.TaskScheduler.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---SQLitePCLRaw.batteries_v2.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---SQLitePCLRaw.core.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---SQLitePCLRaw.provider.dynamic_cdecl.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---SQLitePCLRaw.provider.e_sqlite3.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---System.Buffers.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---System.CodeDom.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---System.Diagnostics.DiagnosticSource.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---System.Diagnostics.EventLog.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---System.Memory.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---System.Numerics.Vectors.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---System.Runtime.CompilerServices.Unsafe.dll" />
-    <EmbeddedResource Include="Properties\resources\ame-assassin---System.Security.Principal.Windows.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---CHANGELOG.txt" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---COPYRIGHT.txt" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---LICENSE.txt" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---README.txt" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---kprocesshacker.sys" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---peview.exe" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---DotNetTools.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---ExtendedNotifications.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---ExtendedServices.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---ExtendedTools.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---NetworkTools.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---OnlineChecks.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---SbieSupport.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---ToolStatus.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---Updater.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---UserNotes.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---plugins---WindowExplorer.dll" />
-    <EmbeddedResource Include="Properties\resources\ProcessHacker---x64---ProcessHacker.exe" />
-  </ItemGroup>
-  <ItemGroup>
-    <EmbeddedResource Include="Properties\resources\NSudoLC.exe" />
+    <EmbeddedResource Include="Properties\resources\7za.dll" />
+    <EmbeddedResource Include="Properties\resources\7za.exe" />
+    <EmbeddedResource Include="Properties\resources\7zxa.dll" />
+    <EmbeddedResource Include="Properties\resources\CLI-Resources.7z" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

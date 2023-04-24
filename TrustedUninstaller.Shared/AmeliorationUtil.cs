@@ -7,19 +7,15 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.ServiceProcess;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 using System.Xml;
 using System.Xml.Serialization;
 using TrustedUninstaller.Shared.Actions;
 using TrustedUninstaller.Shared.Parser;
 using TrustedUninstaller.Shared.Tasks;
-using MessageBox = System.Windows.MessageBox;
 
 namespace TrustedUninstaller.Shared
 {
@@ -29,8 +25,7 @@ namespace TrustedUninstaller.Shared
         private static readonly ConfigParser Parser = new ConfigParser();
 
         private static readonly HttpClient Client = new HttpClient();
-
-        //TODO: custom.yml path or .apbx path?
+        
         public static Playbook Playbook { set; get; }
 
         public static readonly List<string> ErrorDisplayList = new List<string>();
@@ -193,38 +188,46 @@ namespace TrustedUninstaller.Shared
                     int i = 0;
 
                     //var actionType = action.GetType().ToString().Replace("TrustedUninstaller.Shared.Actions.", "");
-                    
-                    do
+
+                    try
                     {
-                        //Console.WriteLine($"Running {actionType}");
-                        Console.WriteLine();
-                        try
+                        do
                         {
-                            await action.RunTask();
-                            action.ResetProgress();
-                        }
-                        catch (Exception e)
-                        {
-                            action.ResetProgress();
-                            if (e.InnerException != null)
+                            //Console.WriteLine($"Running {actionType}");
+                            Console.WriteLine();
+                            try
                             {
-                                ErrorLogger.WriteToErrorLog(e.InnerException.Message, e.InnerException.StackTrace, e.Message);
+                                await action.RunTask();
+                                action.ResetProgress();
                             }
-                            else
+                            catch (Exception e)
                             {
-                                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, action.ErrorString());
-                                List<string> ExceptionBreakList = new List<string>() { "System.ArgumentException", "System.SecurityException", "System.UnauthorizedAccessException", "System.UnauthorizedAccessException", "System.TimeoutException" };
-                                if (ExceptionBreakList.Any(x => x.Equals(e.GetType().ToString())))
+                                action.ResetProgress();
+                                if (e.InnerException != null)
                                 {
-                                    i = 10;
-                                    break;
-                                } 
+                                    ErrorLogger.WriteToErrorLog(e.InnerException.Message, e.InnerException.StackTrace, e.Message);
+                                }
+                                else
+                                {
+                                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, action.ErrorString());
+                                    List<string> ExceptionBreakList = new List<string>() { "System.ArgumentException", "System.SecurityException", "System.UnauthorizedAccessException", "System.UnauthorizedAccessException", "System.TimeoutException" };
+                                    if (ExceptionBreakList.Any(x => x.Equals(e.GetType().ToString())))
+                                    {
+                                        i = 10;
+                                        break;
+                                    } 
+                                }
                             }
-                        }
-                        Console.WriteLine($"Status: {action.GetStatus()}");
-                        if (i > 0) Thread.Sleep(50);
-                        i++;
-                    } while (action.GetStatus() != UninstallTaskStatus.Completed && i < 10);
+                            Console.WriteLine($"Status: {action.GetStatus()}");
+                            if (i > 0) Thread.Sleep(50);
+                            i++;
+                        } while (action.GetStatus() != UninstallTaskStatus.Completed && i < 10);
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Critical error while running action.");
+                        Console.WriteLine($":AME-ERROR: Critical error while running action: " + e.Message);
+                    }
 
                     if (i == 10)
                     {
@@ -259,7 +262,7 @@ namespace TrustedUninstaller.Shared
             XmlSerializer serializer = new XmlSerializer(typeof(Playbook));
             using (XmlReader reader = XmlReader.Create($"{dir}\\playbook.conf"))
             {
-                pb = (Playbook)(serializer.Deserialize(reader));
+                pb = (Playbook)serializer.Deserialize(reader);
             }
             pb.Path = dir;
 
@@ -380,13 +383,18 @@ namespace TrustedUninstaller.Shared
 
 
             //Check if the kernel driver is installed.
-            service = ServiceController.GetDevices()
-                .FirstOrDefault(s => s.DisplayName == "KProcessHacker2");
-            if (service != null)
+            //service = ServiceController.GetDevices()
+                //.FirstOrDefault(s => s.DisplayName == "KProcessHacker2");
+            if (true)
             { 
                 //Remove Process Hacker's kernel driver.
                 await WinUtil.UninstallDriver();
             }
+            await AmeliorationUtil.SafeRunAction(new RegistryKeyAction()
+            {
+                KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2",
+            });
+
             File.Delete("TasksAdded.txt");
             
             Console.WriteLine();

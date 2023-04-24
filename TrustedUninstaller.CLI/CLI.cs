@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Windows;
 using TrustedUninstaller.Shared;
 using TrustedUninstaller.Shared.Actions;
@@ -41,22 +42,13 @@ namespace TrustedUninstaller.CLI
             }
             
             AmeliorationUtil.Playbook = await AmeliorationUtil.DeserializePlaybook(args[0]);
-            
-            
-            if (!Directory.Exists($"{AmeliorationUtil.Playbook.Path}\\Configuration"))
-            {
-                Console.WriteLine("Creating Configuration folder...");
-                Directory.CreateDirectory($"{AmeliorationUtil.Playbook.Path}\\Configuration");
-            }
 
-            if (Directory.GetFiles($"{AmeliorationUtil.Playbook.Path}\\Configuration").Length == 0)
+            if (!Directory.Exists($"{AmeliorationUtil.Playbook.Path}\\Configuration") || Directory.GetFiles($"{AmeliorationUtil.Playbook.Path}\\Configuration").Length == 0)
             {
                 Console.WriteLine("Configuration folder is empty, put YAML files in it and restart the application.");
                 Console.WriteLine($"Current directory: {Directory.GetCurrentDirectory()}");
                 return -1;
             }
-            
-            ExtractResourceFolder("resources", Directory.GetCurrentDirectory());
 
             if (!WinUtil.IsTrustedInstaller())
             {
@@ -87,21 +79,81 @@ namespace TrustedUninstaller.CLI
                         Console.WriteLine("Error preparing system: " + e.Message);
                         Environment.Exit(-1);
                     }
+
                 }
                 if (AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.Internet) && !await (new Requirements.Internet()).IsMet())
                 {
                     Console.WriteLine("Internet must be connected to run this Playbook.");
+
+
                 
                 }
+
             }
             
+            try
+            {
+                if (!Directory.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ame-assassin")))
+                {
+                    Console.WriteLine(":AME-STATUS: Extracting resources");
+
+                    ExtractResourceFolder("resources", Directory.GetCurrentDirectory());
+                    ExtractArchive(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "CLI-Resources.7z"), AppDomain.CurrentDomain.BaseDirectory);
+                    try
+                    {
+                        File.Delete(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "CLI-Resources.7z"));
+                    }
+                    catch (Exception e) { }
+                }
+            }
+            catch (Exception e)
+            {
+                ErrorLogger.WriteToErrorLog(e.Message,
+                    e.StackTrace, "Error extracting resources.");
+                
+                Console.WriteLine($":AME-Fatal Error: Error extracting resources.");
+                return -1;
+            }
             
             await AmeliorationUtil.StartAmelioration();
             
             return 0;
         }
         
-        
+        public static void ExtractArchive(string file, string targetDir)
+        {
+            RunCommand($"x \"{file}\" -o\"{targetDir}\" -p\"wizard\" -y -aos");
+        }
+        private static void RunCommand(string command)
+        {
+            var proc = new Process();
+            var startInfo = new ProcessStartInfo
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                WindowStyle = ProcessWindowStyle.Normal,
+                Arguments = command,
+                FileName = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "7za.exe"),
+                RedirectStandardError = true,
+            };
+            
+            proc.StartInfo = startInfo;
+
+            proc.Start();
+            StringBuilder errorOutput = new StringBuilder("");
+            
+            proc.ErrorDataReceived += (sender, args) => { errorOutput.Append("\r\n" + args.Data); };
+            proc.BeginErrorReadLine();
+            
+            proc.WaitForExit();
+
+            proc.CancelErrorRead();
+
+            if (proc.ExitCode == 1)
+                ErrorLogger.WriteToErrorLog(errorOutput.ToString(), Environment.StackTrace, "Warning while running 7zip.", command);
+            if (proc.ExitCode > 1)
+                throw new ArgumentOutOfRangeException("Error running 7zip: " + errorOutput.ToString());
+        }
          public static void ExtractResourceFolder(string resource, string dir, bool overwrite = false)
         {
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);

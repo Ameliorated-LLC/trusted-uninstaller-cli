@@ -14,12 +14,12 @@ using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    internal enum RegistryKeyOperation
+    public enum RegistryKeyOperation
     {
         Delete = 0,
         Add = 1
     }
-    class RegistryKeyAction : ITaskAction
+    public class RegistryKeyAction : ITaskAction
     {
         [YamlMember(typeof(string), Alias = "path")]
         public string KeyName { get; set; }

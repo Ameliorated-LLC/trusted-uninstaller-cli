@@ -7,6 +7,7 @@ using System.Security;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
 using Microsoft.Win32;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
@@ -56,20 +57,23 @@ namespace TrustedUninstaller.Shared.Actions
         public RegistryValueOperation Operation { get; set; } = RegistryValueOperation.Add;
         
         [YamlMember(typeof(string), Alias = "weight")]
-        public int ProgressWeight { get; set; } = 0;
+        public int ProgressWeight { get; set; } = 1;
         public int GetProgressWeight()
         {
+            /*
             int roots;
             try
             {
                 roots = GetRoots().Count;
             }
-            catch (Exception)
+            catch (Exception e)
             {
+
                 roots = 1;
             }
+            */
 
-            return ProgressWeight + roots;
+            return ProgressWeight;
         }
         
         private bool InProgress { get; set; }

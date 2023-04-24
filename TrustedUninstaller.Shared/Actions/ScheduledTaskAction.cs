@@ -67,7 +67,10 @@ namespace TrustedUninstaller.Shared.Actions
             else
             {
                 var folder = ts.GetFolder(Path);
-                return folder == null ? UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo;
+                if (folder == null)
+                    return UninstallTaskStatus.Completed;
+                
+                return folder.GetTasks().Any() ? UninstallTaskStatus.ToDo : UninstallTaskStatus.Completed;
             }
         }
 
@@ -143,7 +146,14 @@ namespace TrustedUninstaller.Shared.Actions
                 
                 folder.GetTasks().ToList().ForEach(x => folder.DeleteTask(x.Name));
 
-                folder.Parent.DeleteFolder(folder.Name);
+                try
+                {
+                    folder.Parent.DeleteFolder(folder.Name);
+                }
+                catch (Exception e)
+                {
+                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error removing task folder.", folder.Name);
+                }
 
                 InProgress = false;
                 return true;

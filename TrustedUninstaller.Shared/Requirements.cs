@@ -40,7 +40,8 @@ namespace TrustedUninstaller.Shared
             PasswordSet = 7,
             [XmlEnum("AdministratorPasswordSet")]
             AdministratorPasswordSet = 8,
-            
+            [XmlEnum("PluggedIn")]
+            PluggedIn = 9,
         }
 
         public static async Task<Requirement[]> MetRequirements(this Requirement[] requirements)
@@ -52,24 +53,24 @@ namespace TrustedUninstaller.Shared
             }
             // Add all requirements that are not included
             var metRequirements = requirementEnum.Except(requirements).ToList();
-            
-            if (requirements.Contains (Requirement.Internet))
+
+            if (requirements.Contains(Requirement.Internet))
                 if (await new Internet().IsMet()) metRequirements.Add(Requirement.Internet);
                 else metRequirements.Add(Requirement.NoInternet);
 
-            if (requirements.Contains (Requirement.NoAntivirus))
+            if (requirements.Contains(Requirement.NoAntivirus))
                 if (await new NoAntivirus().IsMet()) metRequirements.Add(Requirement.NoAntivirus);
             
-            if (requirements.Contains (Requirement.NoPendingUpdates))
+            if (requirements.Contains(Requirement.NoPendingUpdates))
                 if (await new NoPendingUpdates().IsMet()) metRequirements.Add(Requirement.NoPendingUpdates);
 
-            if (requirements.Contains (Requirement.Activation))
+            if (requirements.Contains(Requirement.Activation))
                 if (await new Activation().IsMet()) metRequirements.Add(Requirement.Activation);
             
-            if (requirements.Contains (Requirement.DefenderDisabled))
+            if (requirements.Contains(Requirement.DefenderDisabled))
                 if (await new DefenderDisabled().IsMet()) metRequirements.Add(Requirement.DefenderDisabled);
             
-            if (requirements.Contains (Requirement.DefenderToggled))
+            if (requirements.Contains(Requirement.DefenderToggled))
                 if (await new DefenderDisabled().IsMet()) metRequirements.Add(Requirement.DefenderToggled);
             
             if (requirements.Contains(Requirement.PasswordSet))
@@ -77,7 +78,10 @@ namespace TrustedUninstaller.Shared
 
             if (requirements.Contains(Requirement.AdministratorPasswordSet))
                 metRequirements.Add(Requirement.AdministratorPasswordSet);
-                
+                        
+            if (requirements.Contains(Requirement.PluggedIn))
+                if (await new Battery().IsMet()) metRequirements.Add(Requirement.PluggedIn);
+            
             return metRequirements.ToArray();
         }
         
@@ -103,6 +107,64 @@ namespace TrustedUninstaller.Shared
             {
                 ProgressChanged?.Invoke(this, new ProgressEventArgs(percent));
             }
+        }
+
+        public class Battery : RequirementBase, IRequirements
+        {
+            [StructLayout(LayoutKind.Sequential)]
+            public class PowerState
+            {
+                public ACLineStatus ACLineStatus;
+                public BatteryFlag BatteryFlag;
+                public Byte BatteryLifePercent;
+                public Byte Reserved1;
+                public Int32 BatteryLifeTime;
+                public Int32 BatteryFullLifeTime;
+
+                // direct instantation not intended, use GetPowerState.
+                private PowerState() {}
+
+                public static PowerState GetPowerState()
+                {
+                    PowerState state = new PowerState();
+                    if (GetSystemPowerStatusRef(state))
+                        return state;
+
+                    throw new ApplicationException("Unable to get power state");
+                }
+
+                [DllImport("Kernel32", EntryPoint = "GetSystemPowerStatus")]
+                private static extern bool GetSystemPowerStatusRef(PowerState sps);
+            }
+
+            // Note: Underlying type of byte to match Win32 header
+            public enum ACLineStatus : byte
+            {
+                Offline = 0, Online = 1, Unknown = 255
+            }
+
+            public enum BatteryFlag : byte
+            {
+                High = 1, Low = 2, Critical = 4, Charging = 8,
+                NoSystemBattery = 128, Unknown = 255
+            }
+
+            public async Task<bool> IsMet()
+            {
+                try
+                {
+                    PowerState state = PowerState.GetPowerState();
+                    if ((state.BatteryFlag == BatteryFlag.NoSystemBattery || state.BatteryFlag == BatteryFlag.Charging)
+                        || state.ACLineStatus == ACLineStatus.Online || (state.ACLineStatus == ACLineStatus.Unknown && state.BatteryFlag == BatteryFlag.Unknown))
+                        return true;
+                    else
+                        return false;
+                }
+                catch { }
+                return true;
+            }
+
+            public Task<bool> Meet() => throw new NotImplementedException();
         }
 
         public class Internet : RequirementBase, IRequirements
