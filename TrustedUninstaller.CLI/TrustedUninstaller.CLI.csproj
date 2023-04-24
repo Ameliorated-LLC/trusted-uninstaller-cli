@@ -155,5 +155,8 @@
     <EmbeddedResource Include="Properties\resources\7zxa.dll" />
     <EmbeddedResource Include="Properties\resources\CLI-Resources.7z" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Properties\resources\NSudoLC.exe" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

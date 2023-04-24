@@ -1,10 +1,13 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using System.Threading.Tasks;
 using System.Windows;
+using Microsoft.Win32;
 using TrustedUninstaller.Shared;
 using TrustedUninstaller.Shared.Actions;
 
@@ -42,6 +45,7 @@ namespace TrustedUninstaller.CLI
             }
             
             AmeliorationUtil.Playbook = await AmeliorationUtil.DeserializePlaybook(args[0]);
+            AmeliorationUtil.Playbook.Path = args[0];
 
             if (!Directory.Exists($"{AmeliorationUtil.Playbook.Path}\\Configuration") || Directory.GetFiles($"{AmeliorationUtil.Playbook.Path}\\Configuration").Length == 0)
             {
@@ -49,7 +53,7 @@ namespace TrustedUninstaller.CLI
                 Console.WriteLine($"Current directory: {Directory.GetCurrentDirectory()}");
                 return -1;
             }
-
+            ExtractResourceFolder("resources", Directory.GetCurrentDirectory());
             if (!WinUtil.IsTrustedInstaller())
             {
                 Console.WriteLine("Checking requirements...\r\n");
@@ -60,7 +64,14 @@ namespace TrustedUninstaller.CLI
             
                 if (AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.DefenderDisabled) && Process.GetProcessesByName("MsMpEng").Any())
                 {
-                    Console.WriteLine("The system must be prepared before continuing. Make sure all 4 windows security toggles are set to off.\r\nYour system will restart after preparation\r\nPress any key to continue...");
+                    bool first = true;
+
+                    while ((await GetDefenderToggles()).Any(x => x))
+                    {
+                        Console.WriteLine("All 4 windows security toggles must be set to off.\r\nNavigate to Windows Security > Virus & threat detection > manage settings.\r\nPress any key to continue...");
+                        Console.ReadKey();
+                    }
+                    Console.WriteLine("The system must be prepared before continuing Your system will restart after preparation\r\nPress any key to continue...");
                     Console.ReadKey();
                     try
                     {
@@ -84,9 +95,6 @@ namespace TrustedUninstaller.CLI
                 if (AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.Internet) && !await (new Requirements.Internet()).IsMet())
                 {
                     Console.WriteLine("Internet must be connected to run this Playbook.");
-
-
-                
                 }
 
             }
@@ -218,6 +226,117 @@ namespace TrustedUninstaller.CLI
                     }
                 }
             }
+        }
+         
+         
+        public static async Task<List<bool>> GetDefenderToggles()
+        {
+            var result = new List<bool>();
+
+            await Task.Run(() =>
+            {
+                var defenderKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows Defender");
+                var policiesKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Policies\Microsoft\Windows Defender");
+
+                RegistryKey realtimePolicy = null;
+                RegistryKey realtimeKey = null;
+                try
+                {
+                    try
+                    {
+                        realtimePolicy = policiesKey.OpenSubKey("Real-Time Protection");
+                    }
+                    catch (Exception e) { }
+
+                    if (realtimePolicy != null)
+                        realtimeKey = realtimePolicy;
+                    else
+                        realtimeKey = defenderKey.OpenSubKey("Real-Time Protection");
+                }
+                catch
+                {
+                    result.Add(false);
+                }
+                if (realtimeKey != null)
+                {
+                    try
+                    {
+                        result.Add((int)realtimeKey.GetValue("DisableRealtimeMonitoring") != 1);
+                    }
+                    catch (Exception exception)
+                    {
+                        try
+                        {
+                            realtimeKey = defenderKey.OpenSubKey("Real-Time Protection");
+                            result.Add((int)realtimeKey.GetValue("DisableRealtimeMonitoring") != 1);
+                        }
+                        catch (Exception e)
+                        {
+                            result.Add(true);
+                        }
+                    }
+                }
+
+                try
+                {
+                    RegistryKey spynetPolicy = null;
+                    RegistryKey spynetKey = null;
+                    
+                    try
+                    {
+                        spynetPolicy = policiesKey.OpenSubKey("SpyNet");
+                    }
+                    catch (Exception e) { }
+
+                    if (spynetPolicy != null)
+                        spynetKey = spynetPolicy;
+                    else
+                        spynetKey = defenderKey.OpenSubKey("SpyNet");
+
+                    int reporting = 0;
+                    int consent = 0;
+                    try
+                    {
+                        reporting = (int)spynetKey.GetValue("SpyNetReporting");
+                    }
+                    catch (Exception e)
+                    {
+                        if (spynetPolicy != null)
+                        {
+                            reporting = (int)defenderKey.OpenSubKey("SpyNet").GetValue("SpyNetReporting");
+                        }
+                    }
+                    try
+                    {
+                        consent = (int)spynetKey.GetValue("SubmitSamplesConsent");
+                    }
+                    catch (Exception e)
+                    {
+                        if (spynetPolicy != null)
+                        {
+                            consent = (int)defenderKey.OpenSubKey("SpyNet").GetValue("SubmitSamplesConsent");
+                        }
+                    }
+
+                    result.Add(reporting != 0);
+                    result.Add(consent != 0 && consent != 2 && consent != 4);
+                }
+                catch
+                {
+                    result.Add(false);
+                    result.Add(false);
+                }
+                try
+                {
+                    int tamper = (int)defenderKey.OpenSubKey("Features").GetValue("TamperProtection");
+                    result.Add(tamper != 4 && tamper != 0);
+                }
+                catch
+                {
+                    result.Add(false);
+                }
+            });
+            return result;
         }
     }
 }
