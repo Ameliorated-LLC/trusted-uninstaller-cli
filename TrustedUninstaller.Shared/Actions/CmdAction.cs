@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Threading.Tasks;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
@@ -8,7 +9,7 @@ using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class CmdAction : ITaskAction
+    public class CmdAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "command")]
         public string Command { get; set; }
@@ -84,8 +85,16 @@ namespace TrustedUninstaller.Shared.Actions
                 process.Dispose();
                 return true;
             }
-                
+            
+            var error = new StringBuilder();
             process.OutputDataReceived += ProcOutputHandler;
+            process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs args)
+            {
+                if (!String.IsNullOrEmpty(args.Data))
+                    error.AppendLine(args.Data);
+                else
+                    error.AppendLine();
+            };
             
             process.BeginOutputReadLine();
 
@@ -104,7 +113,7 @@ namespace TrustedUninstaller.Shared.Actions
 
             if (process.ExitCode != 0)
             {
-                StandardError = process.StandardError.ReadToEnd();
+                StandardError = error.ToString();
                 Console.WriteLine($"cmd instance exited with error code: {process.ExitCode}");
                 if (!String.IsNullOrEmpty(StandardError)) Console.WriteLine($"Error message: {StandardError}");
                 

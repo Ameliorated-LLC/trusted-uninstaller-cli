@@ -1,6 +1,7 @@
 ﻿using Newtonsoft.Json.Linq;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Linq;
@@ -11,6 +12,7 @@ using System.ServiceProcess;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
 using System.Xml;
 using System.Xml.Serialization;
 using TrustedUninstaller.Shared.Actions;
@@ -30,9 +32,23 @@ namespace TrustedUninstaller.Shared
 
         public static readonly List<string> ErrorDisplayList = new List<string>();
 
-        public static int GetProgressMaximum()
+        public static int GetProgressMaximum(List<string> options)
         {
-            return Parser.Tasks.Sum(task => task.Actions.Sum(action => action.GetProgressWeight()));
+            return Parser.Tasks.Sum(task => task.Actions.Sum(action =>
+            {
+                var taskAction = (TaskAction)action;
+                if (!String.IsNullOrEmpty(taskAction.Option) && (options == null ||
+                        (taskAction.Option.StartsWith("!") && options.Contains(taskAction.Option.Substring(1), StringComparer.OrdinalIgnoreCase)) ||
+                        (!options.Contains(taskAction.Option, StringComparer.OrdinalIgnoreCase))))
+                    return 0;
+
+                if (!String.IsNullOrEmpty(taskAction.Arch) && (
+                        (taskAction.Arch.StartsWith("!") && String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase)) ||
+                        (!String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase))))
+                    return 0;
+                
+                return action.GetProgressWeight();
+            }));
         }
         
         public static bool AddTasks(string configPath, string file)
@@ -89,16 +105,16 @@ namespace TrustedUninstaller.Shared
             try
             {
                 //If the privilege is admin and the program is running as TI, do not do the action.
-                if (privilege == UninstallTaskPrivilege.Admin && WinUtil.IsTrustedInstaller())
-                {
-                    return 0;
-                }
+                //if (privilege == UninstallTaskPrivilege.Admin && WinUtil.IsTrustedInstaller())
+                //{
+                //    return 0;
+                //}
                 
-                if (privilege == UninstallTaskPrivilege.TrustedInstaller && !WinUtil.IsTrustedInstaller())
+                if (!WinUtil.IsTrustedInstaller())
                 {
                     Console.WriteLine("Relaunching as Trusted Installer!");
                     
-                    var mmf = MemoryMappedFile.CreateNew("ImgA", 5000000);
+                    var mmf = MemoryMappedFile.CreateNew("ImgA", 30000000);
                     WinUtil.RelaunchAsTrustedInstaller();
                     if (NativeProcess.Process == null)
                     {
@@ -185,6 +201,18 @@ namespace TrustedUninstaller.Shared
                 //Check the Actions folder inside the Shared folder for reference.
                 foreach (ITaskAction action in task.Actions)
                 {
+                    var taskAction = (TaskAction)action;
+
+                    if (!String.IsNullOrEmpty(taskAction.Option) && (Playbook.Options == null || 
+                            (taskAction.Option.StartsWith("!") && Playbook.Options.Contains(taskAction.Option.Substring(1), StringComparer.OrdinalIgnoreCase)) || 
+                            (!Playbook.Options.Contains(taskAction.Option, StringComparer.OrdinalIgnoreCase))))
+                        continue;
+                    
+                    if (!String.IsNullOrEmpty(taskAction.Arch) && (
+                            (taskAction.Arch.StartsWith("!") && String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase)) ||
+                            (!String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase))))
+                        continue;
+                    
                     int i = 0;
 
                     //var actionType = action.GetType().ToString().Replace("TrustedUninstaller.Shared.Actions.", "");
@@ -217,6 +245,7 @@ namespace TrustedUninstaller.Shared
                                         break;
                                     } 
                                 }
+                                Thread.Sleep(300);
                             }
                             Console.WriteLine($"Status: {action.GetStatus()}");
                             if (i > 0) Thread.Sleep(50);
@@ -226,7 +255,8 @@ namespace TrustedUninstaller.Shared
                     catch (Exception e)
                     {
                         ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Critical error while running action.");
-                        Console.WriteLine($":AME-ERROR: Critical error while running action: " + e.Message);
+                        if (!((TaskAction)action).IgnoreErrors)
+                            Console.WriteLine($":AME-ERROR: Critical error while running action: " + e.Message);
                     }
 
                     if (i == 10)
@@ -235,7 +265,8 @@ namespace TrustedUninstaller.Shared
                         ErrorLogger.WriteToErrorLog(errorString, Environment.StackTrace, "Action failed to complete.");
                         // AmeliorationUtil.ErrorDisplayList.Add(errorString) would NOT work here since this
                         // might be a separate process, and thus has to be forwarded via the console
-                        Console.WriteLine($":AME-ERROR: {errorString}");
+                        if (!((TaskAction)action).IgnoreErrors)
+                            Console.WriteLine($":AME-ERROR: {errorString}");
                         //Environment.Exit(-2);
                         Console.WriteLine($"Action completed. Weight:{action.GetProgressWeight()}");
                         continue;
@@ -260,12 +291,32 @@ namespace TrustedUninstaller.Shared
             Playbook pb;
             
             XmlSerializer serializer = new XmlSerializer(typeof(Playbook));
+            /*serializer.UnknownElement += delegate(object sender, XmlElementEventArgs args)
+            {
+                MessageBox.Show(args.Element.Name);
+            };
+            serializer.UnknownAttribute += delegate(object sender, XmlAttributeEventArgs args)
+            {
+                MessageBox.Show(args.Attr.Name);
+            };*/
             using (XmlReader reader = XmlReader.Create($"{dir}\\playbook.conf"))
             {
                 pb = (Playbook)serializer.Deserialize(reader);
             }
-            pb.Path = dir;
+            var validateResult = pb.Validate();
+            if (validateResult != null)
+                throw new XmlException(validateResult);
 
+            if (File.Exists($"{dir}\\options.txt"))
+            {
+                pb.Options = new List<string>();
+                using (var reader = new StreamReader($"{dir}\\options.txt"))
+                {
+                    while (!reader.EndOfStream)
+                        pb.Options.Add(reader.ReadLine());
+                }
+            }
+            pb.Path = dir;
             return Task.FromResult(pb);
         }
 
@@ -335,17 +386,19 @@ namespace TrustedUninstaller.Shared
             if (Parser.Tasks.Any(x => x.Priority != Parser.Tasks.First().Priority))
                 Parser.Tasks.Sort(new TaskComparer());
 
-            UninstallTaskPrivilege prevPriv = UninstallTaskPrivilege.Admin;
+            bool launched = false;
             foreach (var task in Parser.Tasks.Where(task => task.Actions.Count != 0))
             {
                 try
                 {
-                    if (prevPriv == UninstallTaskPrivilege.TrustedInstaller && task.Privilege == UninstallTaskPrivilege.TrustedInstaller && !WinUtil.IsTrustedInstaller())
+                    //if (prevPriv == UninstallTaskPrivilege.TrustedInstaller && task.Privilege == UninstallTaskPrivilege.TrustedInstaller && !WinUtil.IsTrustedInstaller())
+                    if (!WinUtil.IsTrustedInstaller() && launched)
                     {
                         continue;
                     }
+                    launched = true;
                     await DoActions(task, task.Privilege);
-                    prevPriv = task.Privilege;
+                    //prevPriv = task.Privilege;
                 }
                 catch (Exception ex)
                 {

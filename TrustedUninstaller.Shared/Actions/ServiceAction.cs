@@ -23,7 +23,7 @@ namespace TrustedUninstaller.Shared.Actions
         Delete,
         Change
     }
-    internal class ServiceAction : ITaskAction
+    internal class ServiceAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(ServiceOperation), Alias = "operation")]
         public ServiceOperation Operation { get; set; } = ServiceOperation.Delete;
@@ -305,8 +305,8 @@ namespace TrustedUninstaller.Shared.Actions
             else
             {
                 cmdAction.Command = Environment.Is64BitOperatingSystem ?
-                    $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {ServiceName} -caction {Operation.ToString().ToLower()}" : 
-                    $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {ServiceName} -caction {Operation.ToString().ToLower()}";
+                    $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction {Operation.ToString().ToLower()}" : 
+                    $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction {Operation.ToString().ToLower()}";
                 await cmdAction.RunTask();
             }
 

@@ -19,7 +19,7 @@ namespace TrustedUninstaller.Shared.Actions
         DeleteFolder = 3
     }
 
-    internal class ScheduledTaskAction : ITaskAction
+    internal class ScheduledTaskAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(ScheduledTaskOperation), Alias = "operation")]
         public ScheduledTaskOperation Operation { get; set; } = ScheduledTaskOperation.Delete;

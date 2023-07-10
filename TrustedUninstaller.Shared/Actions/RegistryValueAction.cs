@@ -36,7 +36,7 @@ namespace TrustedUninstaller.Shared.Actions
         REG_UNKNOWN = RegistryValueKind.Unknown
     }
 
-    public class RegistryValueAction : ITaskAction
+    public class RegistryValueAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "path")]
         public string KeyName { get; set; }

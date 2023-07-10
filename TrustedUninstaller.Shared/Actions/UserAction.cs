@@ -8,7 +8,7 @@ using System.Security.Principal;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class UserAction : ITaskAction
+    public class UserAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "name")]
         public string Username { get; set; } = "";

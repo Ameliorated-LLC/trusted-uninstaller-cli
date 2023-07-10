@@ -8,7 +8,7 @@ using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class RunAction : ITaskAction
+    public class RunAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "path")]
         public string RawPath { get; set; } = null;

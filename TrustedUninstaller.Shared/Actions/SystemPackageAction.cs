@@ -11,7 +11,8 @@ using System.Threading;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    internal class SystemPackageAction : ITaskAction
+    // Integrate ame-assassin later
+    internal class SystemPackageAction : TaskAction, ITaskAction
     {
         public enum Architecture
         {

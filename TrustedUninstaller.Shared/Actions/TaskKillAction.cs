@@ -11,7 +11,7 @@ using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    class TaskKillAction : ITaskAction
+    class TaskKillAction : TaskAction, ITaskAction
     {
         [DllImport("kernel32.dll", SetLastError=true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -85,7 +85,7 @@ namespace TrustedUninstaller.Shared.Actions
                 .Where(process => process.ProcessName.EndsWith(ProcessName.TrimStart('*'), StringComparison.CurrentCultureIgnoreCase));
 
             return Process.GetProcessesByName(ProcessName);
-        }
+        } 
         [DllImport("kernel32.dll", SetLastError=true)]
         static extern bool IsProcessCritical(IntPtr hProcess, ref bool Critical);
         
@@ -252,7 +252,15 @@ namespace TrustedUninstaller.Shared.Actions
                     if (!RegexNotCritical.Any(x => Regex.Match(process.ProcessName, x, RegexOptions.IgnoreCase).Success))
                     {
                         bool isCritical = false;
-                        IsProcessCritical(process.Handle, ref isCritical);
+                        try
+                        {
+                            IsProcessCritical(process.Handle, ref isCritical);
+                        }
+                        catch (InvalidOperationException e)
+                        {
+                            ErrorLogger.WriteToErrorLog("Could not check if process is critical.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                            return false;
+                        }
                         if (isCritical)
                         {
                             Console.WriteLine($"{process.ProcessName} is a critical process, skipping...");
@@ -285,7 +293,15 @@ namespace TrustedUninstaller.Shared.Actions
                         if (!RegexNotCritical.Any(x => Regex.Match(process.ProcessName, x, RegexOptions.IgnoreCase).Success))
                         {
                             bool isCritical = false;
-                            IsProcessCritical(process.Handle, ref isCritical);
+                            try
+                            {
+                                IsProcessCritical(process.Handle, ref isCritical);
+                            }
+                            catch (InvalidOperationException e)
+                            {
+                                ErrorLogger.WriteToErrorLog("Could not check if process is critical.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                                continue;
+                            }
                             if (isCritical)
                             {
                                 Console.WriteLine($"{process.ProcessName} is a critical process, skipping...");

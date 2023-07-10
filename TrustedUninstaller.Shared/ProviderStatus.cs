@@ -39,6 +39,7 @@ namespace TrustedUninstaller.Shared
         public SignatureStatusFlags SignatureStatus;
         public AVStatusFlags AVStatus;
         public ProviderFlags SecurityProvider;
+        public bool FileExists;
         public string DisplayName;
     }
 }

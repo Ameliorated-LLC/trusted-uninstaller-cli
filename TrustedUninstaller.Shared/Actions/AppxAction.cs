@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Linq;
 using System.Threading.Tasks;
+//using Windows.ApplicationModel;
+//using Windows.Management.Deployment;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Serialization;
@@ -11,7 +13,8 @@ using System.Threading;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    internal class AppxAction : ITaskAction
+    // Integrate ame-assassin later
+    internal class AppxAction : TaskAction, ITaskAction
     {
         public enum AppxOperation
         {

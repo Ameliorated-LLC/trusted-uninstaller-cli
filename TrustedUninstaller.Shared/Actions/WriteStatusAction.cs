@@ -5,7 +5,7 @@ using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class WriteStatusAction : ITaskAction
+    public class WriteStatusAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "status")]
         public string Status { get; set; }

@@ -8,7 +8,7 @@ using File = System.IO.File;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    class ShortcutAction : ITaskAction
+    class ShortcutAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "path")]
         public string RawPath { get; set; }

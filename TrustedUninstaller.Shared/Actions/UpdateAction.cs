@@ -8,7 +8,7 @@ using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    internal class UpdateAction : ITaskAction
+    internal class UpdateAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "name")]
         public string PackageName { get; set; }

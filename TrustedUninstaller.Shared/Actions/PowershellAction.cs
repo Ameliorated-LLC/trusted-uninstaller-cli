@@ -2,7 +2,6 @@
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Management.Automation;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,7 +12,7 @@ using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class PowerShellAction : ITaskAction
+    public class PowerShellAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "command")]
         public string Command { get; set; }
@@ -69,7 +68,7 @@ namespace TrustedUninstaller.Shared.Actions
                 RedirectStandardOutput = true,
                 CreateNoWindow = true
             };
-            if (ExeDir) startInfo.WorkingDirectory = Directory.GetCurrentDirectory() + "\\Executables";
+            if (ExeDir) startInfo.WorkingDirectory = AmeliorationUtil.Playbook.Path + "\\Executables";
             if (!Wait)
             {
                 startInfo.RedirectStandardError = false;

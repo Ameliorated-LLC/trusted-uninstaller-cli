@@ -19,11 +19,19 @@ namespace TrustedUninstaller.Shared.Tasks
         public int? MaxVersion { get; set; }
 #nullable disable
         public UninstallTaskStatus Status { get; set; } = UninstallTaskStatus.ToDo;
-        public List<ITaskAction> Actions { get; set; }
+        
+        public List<ITaskAction> Actions { get; set; } = new List<ITaskAction>();
 
         public int Priority { get; set; } = 1;
         public UninstallTaskPrivilege Privilege { get; set; } = UninstallTaskPrivilege.Admin;
+        
         public List<string> Features { get; set; } = new List<string>();
+
+        public List<string> Tasks
+        {
+            set => Features = value;
+            get => Features;
+        }
 
         public void Update()
         {

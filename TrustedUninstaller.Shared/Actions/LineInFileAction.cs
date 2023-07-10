@@ -14,7 +14,7 @@ namespace TrustedUninstaller.Shared.Actions
         Delete = 0,
         Add = 1
     }
-    internal class LineInFileAction : ITaskAction
+    internal class LineInFileAction : TaskAction, ITaskAction
     {
         [YamlMember(Alias = "path")]
         public string RawPath { get; set; }

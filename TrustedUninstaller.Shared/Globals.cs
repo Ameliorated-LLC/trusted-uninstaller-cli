@@ -9,8 +9,8 @@ namespace TrustedUninstaller.Shared
 {
     public class Globals
     {
-        public const string CurrentVersion = "0.6.5";
-        public const double CurrentVersionNumber = 0.65;
+        public const string CurrentVersion = "0.7";
+        public const double CurrentVersionNumber = 0.7;
 #if DEBUG
         public static readonly int WinVer = 19045;
 #else

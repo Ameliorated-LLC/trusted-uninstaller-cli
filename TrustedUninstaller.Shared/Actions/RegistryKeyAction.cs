@@ -19,7 +19,7 @@ namespace TrustedUninstaller.Shared.Actions
         Delete = 0,
         Add = 1
     }
-    public class RegistryKeyAction : ITaskAction
+    public class RegistryKeyAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "path")]
         public string KeyName { get; set; }

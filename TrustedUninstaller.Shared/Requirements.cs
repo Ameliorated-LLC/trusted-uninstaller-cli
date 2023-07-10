@@ -14,6 +14,7 @@ using System.Xml.Serialization;
 using Microsoft.Win32;
 using TrustedUninstaller.Shared;
 using TrustedUninstaller.Shared.Actions;
+using TrustedUninstaller.Shared.Tasks;
 
 namespace TrustedUninstaller.Shared
 {
@@ -36,12 +37,16 @@ namespace TrustedUninstaller.Shared
             Activation = 5,
             [XmlEnum("NoAntivirus")]
             NoAntivirus = 6,
+            [XmlEnum("LocalAccounts")]
+            LocalAccounts = 11,
             [XmlEnum("PasswordSet")]
-            PasswordSet = 7,
+            PasswordSet = 11,
             [XmlEnum("AdministratorPasswordSet")]
             AdministratorPasswordSet = 8,
             [XmlEnum("PluggedIn")]
             PluggedIn = 9,
+            [XmlEnum("NoTweakware")]
+            NoTweakware = 10,
         }
 
         public static async Task<Requirement[]> MetRequirements(this Requirement[] requirements)
@@ -59,7 +64,7 @@ namespace TrustedUninstaller.Shared
                 else metRequirements.Add(Requirement.NoInternet);
 
             if (requirements.Contains(Requirement.NoAntivirus))
-                if (await new NoAntivirus().IsMet()) metRequirements.Add(Requirement.NoAntivirus);
+                if (true) metRequirements.Add(Requirement.NoAntivirus);
             
             if (requirements.Contains(Requirement.NoPendingUpdates))
                 if (await new NoPendingUpdates().IsMet()) metRequirements.Add(Requirement.NoPendingUpdates);
@@ -72,9 +77,9 @@ namespace TrustedUninstaller.Shared
             
             if (requirements.Contains(Requirement.DefenderToggled))
                 if (await new DefenderDisabled().IsMet()) metRequirements.Add(Requirement.DefenderToggled);
-            
-            if (requirements.Contains(Requirement.PasswordSet))
-                metRequirements.Add(Requirement.PasswordSet);
+
+            if (requirements.Contains(Requirement.LocalAccounts))
+                metRequirements.Add(Requirement.LocalAccounts);
 
             if (requirements.Contains(Requirement.AdministratorPasswordSet))
                 metRequirements.Add(Requirement.AdministratorPasswordSet);
@@ -210,13 +215,35 @@ namespace TrustedUninstaller.Shared
         {
             public async Task<bool> IsMet()
             {
-                if (Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Services\\WinDefend") != null)
+                try
+                {
+                    if (Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\WinDefend") != null && new RegistryValueAction() { KeyName = @"SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }.GetStatus() != UninstallTaskStatus.Completed)
+                        return false;
+                    
+                    if (Registry.ClassesRoot.OpenSubKey(@"CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32") != null) return false;
+                    if (Registry.ClassesRoot.OpenSubKey(@"CLSID\{a463fcb9-6b1c-4e0d-a80b-a2ca7999e25d}\InprocServer32") != null) return false;
+                    var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity");
+                    if (key != null && (int)key.GetValue("Enabled") != 0)
+                    {
+                        return false;
+                    }
+                }
+                catch (Exception e)
+                {
+                }
+                return RemnantsOnly();
+            }
+            public static bool RemnantsOnly()
+            {
+                if (Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\WinDefend") != null)
                     return false;
                 return Process.GetProcessesByName("MsMpEng").Length == 0;
             }
 
             public async Task<bool> Meet()
             {
+                throw new NotImplementedException();
+                
                 OnProgressAdded(30);
                 try
                 {
@@ -244,7 +271,7 @@ namespace TrustedUninstaller.Shared
                     };
                     await defenderService.RunTask();
                     OnProgressAdded(20);
-                    // MpOAV.dll normally in use by a lot of processes. This prevents that.
+                    // MpOAV.dll normally is in use by a lot of processes. This prevents that.
                     var MpOAVCLSID = new RunAction()
                     {
                         Exe = $"NSudoLC.exe",

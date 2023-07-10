@@ -173,7 +173,7 @@ namespace TrustedUninstaller.Shared
                 select g).FirstOrDefault();
             return msAccount == null ? Environment.UserName : msAccount.Substring(@"MicrosoftAccount\".Length);
         }
-
+        
         public static bool IsLocalAccount()
         {
             var wi = WindowsIdentity.GetCurrent();
@@ -190,15 +190,14 @@ namespace TrustedUninstaller.Shared
         public enum SL_GENUINE_STATE
         {
             SL_GEN_STATE_IS_GENUINE = 0,
-
             // SL_GEN_STATE_INVALID_LICENSE = 1,
             // SL_GEN_STATE_TAMPERED = 2,
             SL_GEN_STATE_LAST = 3
         }
-
+        
         [DllImport("Slwga.dll", EntryPoint = "SLIsGenuineLocal", CharSet = CharSet.None, ExactSpelling =
-            false, SetLastError = false, PreserveSig = true, CallingConvention = CallingConvention.Winapi, BestFitMapping =
-            false, ThrowOnUnmappableChar = false)]
+ false, SetLastError = false, PreserveSig = true, CallingConvention = CallingConvention.Winapi, BestFitMapping =
+ false, ThrowOnUnmappableChar = false)]
         [PreserveSigAttribute()]
         internal static extern uint SLIsGenuineLocal(ref SLID slid, [In, Out] ref SL_GENUINE_STATE genuineState, IntPtr val3);
 
@@ -206,7 +205,7 @@ namespace TrustedUninstaller.Shared
         {
             // Microsoft-Windows-Security-SPP GUID
             // http://technet.microsoft.com/en-us/library/dd772270.aspx
-            var windowsSlid = new SLID("55c92734-d682-4d71-983e-d6ec3f16059f");
+            var windowsSlid = new SLID("55c92734-d682-4d71-983e-d6ec3f16059f"); 
             var genuineState = SL_GENUINE_STATE.SL_GEN_STATE_LAST;
             var resultInt = SLIsGenuineLocal(ref windowsSlid, ref genuineState, IntPtr.Zero);
 #if DEBUG
@@ -214,20 +213,21 @@ namespace TrustedUninstaller.Shared
 #else
             return resultInt == 0 && genuineState == SL_GENUINE_STATE.SL_GEN_STATE_IS_GENUINE;
 #endif
+            
         }
 
         private static IEnumerable<string> GetWindowsGroups(WindowsIdentity id)
         {
             var irc = id.Groups ?? new IdentityReferenceCollection();
-            return irc.Select(ir => (NTAccount)ir.Translate(typeof(NTAccount))).Select(acc => acc.Value).ToList();
+            return irc.Select(ir => (NTAccount) ir.Translate(typeof(NTAccount))).Select(acc => acc.Value).ToList();
         }
 
         public static bool HasWindowsGroup(string groupName)
         {
             var appDomain = Thread.GetDomain();
             appDomain.SetPrincipalPolicy(PrincipalPolicy.WindowsPrincipal);
-            var currentPrincipal = (WindowsPrincipal)Thread.CurrentPrincipal;
-            var groups = GetWindowsGroups((WindowsIdentity)currentPrincipal.Identity);
+            var currentPrincipal = (WindowsPrincipal) Thread.CurrentPrincipal;
+            var groups = GetWindowsGroups((WindowsIdentity) currentPrincipal.Identity);
             return groups.Any(group => group == groupName);
         }
 
@@ -554,7 +554,8 @@ namespace TrustedUninstaller.Shared
                             DisplayName = result["displayName"].ToString(),
                             AVStatus = enabled ? AVStatusFlags.Enabled : AVStatusFlags.Unknown,
                             SecurityProvider = ProviderFlags.ANTIVIRUS,
-                            SignatureStatus = outdated ? SignatureStatusFlags.OutOfDate : SignatureStatusFlags.UpToDate
+                            SignatureStatus = outdated ? SignatureStatusFlags.OutOfDate : SignatureStatusFlags.UpToDate,
+                            FileExists = File.Exists(result["pathToSignedProductExe"].ToString())
                         };
                         avList.Add(av);
                     }
@@ -682,87 +683,7 @@ namespace TrustedUninstaller.Shared
                 return false;
             }
         }
-        
-        public static void PrepareSystemCLI()
-        {
-            try
-            {
-                var defenderStop = new RunAction()
-                {
-                    RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
-                    Exe = $"NSudoLC.exe",
-                    Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait cmd /c \"" +
-                                "sc sdset \"WinDefend\" \"D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWRPLOCRRC;;;BA)(A;;CCLCSWRPLOCRRC;;;BU)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWRPLOCRRC;;;SU)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)\"&" +
-                                "sc config WinDefend start=disabled&" +
-                                "net stop WinDefend\"",
-                    CreateWindow = false,
-                    Timeout = 7500,
-                };
-                defenderStop.RunTask().Wait();
-            } catch (Exception e)
-            {
-            }
 
-            var defenderValues = new RunAction()
-            {
-                RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
-                Exe = $"NSudoLC.exe",
-                Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait cmd /c \"reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"ProductAppDataPath\" /f &" +
-                            " reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"InstallLocation\" /f\"",
-                CreateWindow = false
-            };
-            defenderValues.RunTask().Wait();
-
-            var defenderKey = Registry.LocalMachine.OpenSubKey("SOFTWARE\\Microsoft\\Windows Defender");
-            if (defenderKey != null && defenderKey.GetValueNames().Contains("InstallLocation"))
-            {
-                throw new Exception("Could not remove defender install values.");
-            }
-
-            var defenderService = new RunAction()
-            {
-                RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
-                Exe = $"NSudoLC.exe",
-                Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend\" /f",
-                CreateWindow = false
-            };
-            defenderService.RunTask().Wait();
-
-            if (Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Services\\WinDefend") != null)
-            {
-                throw new Exception("Could not remove WinDefend service.");
-            }
-
-            // MpOAV.dll normally in use by a lot of processes. This prevents that.
-            var MpOAVCLSID = new RunAction()
-            {
-                RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
-                Exe = $"NSudoLC.exe",
-                Arguments = @"-U:T -P:E -M:S -Priority:RealTime -ShowWindowMode:Hide -Wait reg delete ""HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32"" /f",
-                CreateWindow = false
-            };
-            MpOAVCLSID.RunTask().Wait();
-
-            if (Registry.ClassesRoot.OpenSubKey(@"CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32") != null)
-            {
-                throw new Exception("Could not remove MpOAV mapping.");
-            }
-
-            // Can cause ProcessHacker driver warnings without this
-            AmeliorationUtil.SafeRunAction(new RegistryValueAction()
-            {
-                KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
-                Value = "Enabled",
-                Data = 0,
-            }).Wait();
-            AmeliorationUtil.SafeRunAction(new RegistryValueAction()
-            {
-                KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config",
-                Value = "VulnerableDriverBlocklistEnable",
-                Data = 0,
-            }).Wait();
-        }
-        
         public static async Task UninstallDriver()
         {
             CmdAction cmdAction = new CmdAction();
@@ -780,8 +701,6 @@ namespace TrustedUninstaller.Shared
                 throw;
             }
         }
-        
-        
         
         public class RegistryManager
         {
@@ -933,5 +852,99 @@ namespace TrustedUninstaller.Shared
                 }
             }
         }
+        
+        
+    public class HttpProgressClient : IDisposable
+    {
+        private string _downloadUrl;
+        private string _destinationFilePath;
+
+        public HttpClient Client;
+
+        public delegate void ProgressChangedHandler(long? totalFileSize, long totalBytesDownloaded, double? progressPercentage);
+
+        public event ProgressChangedHandler ProgressChanged;
+
+        public HttpProgressClient()
+        {
+            Client = new HttpClient { Timeout = TimeSpan.FromDays(1) };
+        }
+
+        public async Task StartDownload(string downloadUrl, string destinationFilePath, long? size = null)
+        {
+            _downloadUrl = downloadUrl;
+            _destinationFilePath = destinationFilePath;
+            
+            using (var response = await Client.GetAsync(_downloadUrl, HttpCompletionOption.ResponseHeadersRead))
+                await DownloadFileFromHttpResponseMessage(response, size);
+        }
+
+        public Task<HttpResponseMessage> GetAsync(string link)
+        {
+            return Client.GetAsync(link);
+        }
+        
+        private async Task DownloadFileFromHttpResponseMessage(HttpResponseMessage response, long? size)
+        {
+            response.EnsureSuccessStatusCode();
+            
+            if (!size.HasValue)
+                size = response.Content.Headers.ContentLength;
+
+            using (var contentStream = await response.Content.ReadAsStreamAsync())
+                await ProcessContentStream(size, contentStream);
+        }
+
+        private async Task ProcessContentStream(long? totalDownloadSize, Stream contentStream)
+        {
+            var totalBytesRead = 0L;
+            var readCount = 0L;
+            var buffer = new byte[8192];
+            var isMoreToRead = true;
+
+            using (var fileStream = new FileStream(_destinationFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
+            {
+                do
+                {
+                    var bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length);
+                    if (bytesRead == 0)
+                    {
+                        isMoreToRead = false;
+                        TriggerProgressChanged(totalDownloadSize, totalBytesRead);
+                        continue;
+                    }
+                    
+                    await fileStream.WriteAsync(buffer, 0, bytesRead);
+
+                    totalBytesRead += bytesRead;
+                    readCount += 1;
+                    
+                    if (readCount % 50 == 0)
+                        TriggerProgressChanged(totalDownloadSize, totalBytesRead);
+                }
+                while (isMoreToRead);
+            }
+        }
+
+        private void TriggerProgressChanged(long? totalDownloadSize, long totalBytesRead)
+        {
+            if (ProgressChanged == null)
+                return;
+
+            double? progressPercentage = null;
+            if (totalDownloadSize.HasValue)
+            {
+                progressPercentage = Math.Round((double)totalBytesRead / totalDownloadSize.Value * 100, 2);
+            }
+                
+
+            ProgressChanged(totalDownloadSize, totalBytesRead, progressPercentage);
+        }
+
+        public void Dispose()
+        {
+            Client?.Dispose();
+        }
+    }
     }
 }

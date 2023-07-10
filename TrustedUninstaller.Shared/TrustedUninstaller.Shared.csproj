@@ -14,6 +14,9 @@
     <FileAlignment>512</FileAlignment>
     <Deterministic>true</Deterministic>
     <TargetFrameworkProfile />
+    <AllowedReferenceRelatedFileExtensions>
+      *.xml
+    </AllowedReferenceRelatedFileExtensions>
   </PropertyGroup>
   <PropertyGroup>
     <PathMap>$([System.IO.Path]::GetFullPath('$(SolutionDir)'))=./</PathMap>
@@ -40,6 +43,14 @@
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Single File|x64' ">
+    <OutputPath>bin\x64\Release\</OutputPath>
+    <PlatformTarget>x64</PlatformTarget>
+    <Optimize>true</Optimize>
+    <DebugType>embedded</DebugType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants>SINGLE</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <Reference Include="PresentationFramework" />
     <Reference Include="System" />
@@ -61,10 +72,8 @@
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System.Data" />
     <Reference Include="System.Xml" />
-    <Reference Include="Windows">
-      <HintPath>bin\Debug\Windows.winmd</HintPath>
-      <Private>True</Private>
-      <EmbedInteropTypes>False</EmbedInteropTypes>
+    <Reference Include="YamlDotNet">
+      <HintPath>..\TrustedUninstaller.GUI\bin\x64\Release\YamlDotNet.dll</HintPath>
     </Reference>
   </ItemGroup>
   <ItemGroup>
@@ -98,6 +107,7 @@
     <Compile Include="Parser\TaskActionResolver.cs" />
     <Compile Include="Predicates\IPredicate.cs" />
     <Compile Include="Requirements.cs" />
+    <Compile Include="Tasks\TaskAction.cs" />
     <Compile Include="Tasks\UninstallTaskPrivilege.cs" />
     <Compile Include="Tasks\ITaskAction.cs" />
     <Compile Include="Tasks\UninstallTaskStatus.cs" />
@@ -121,7 +131,7 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.PowerShell.5.ReferenceAssemblies" Version="1.1.0" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="System.IO" Version="4.3.0" />
     <PackageReference Include="System.IO.FileSystem" Version="4.3.0" />
     <PackageReference Include="System.IO.FileSystem.Primitives" Version="4.3.0" />
@@ -144,6 +154,15 @@
   <PropertyGroup>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Single File|x64' ">
+    <PostBuildEvent>for /f "usebackq delims=" %%A in (`DIR /B /S /A:d "$(SolutionDir)" ^| FINDSTR /R /c:".*\\bin\\.*\\de$" /c:".*\\bin\\.*\\en$" /c:".*\\bin\\.*\\es$" /c:".*\\bin\\.*\\fr$" /c:".*\\bin\\.*\\it$" /c:".*\\bin\\.*\\ja$" /c:".*\\bin\\.*\\ko$" /c:".*\\bin\\.*\\ru$" /c:".*\\bin\\.*\\zh-Hans$" /c:".*\\bin\\.*\\zh-Hant$" /c:".*\\bin\\.*\\pl$" /c:".*\\bin\\.*\\zh-CN$"`) do (RMDIR /Q /S "%%A" &amp; cmd /c "exit /b 0")
+      cmd /c "echo Compiled&gt; "$(SolutionDir)\TrustedUninstaller.GUI\gui-builder\Compiled.txt""
+    </PostBuildEvent>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Single File|x64' ">
+    <PreBuildEvent>PowerShell -NoP -C "Get-Process 'ame-builder' -EA SilentlyContinue | Wait-Process -EA SilentlyContinue; EXIT 0"
+PowerShell -NoP -C "Start-Process '$(SolutionDir)\TrustedUninstaller.GUI\gui-builder\ame-builder.exe' -ArgumentList 'Shared' -WindowStyle Hidden"</PreBuildEvent>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' != 'Single File|x64' ">
     <PostBuildEvent>for /f "usebackq delims=" %%A in (`DIR /B /S /A:d "$(SolutionDir)" ^| FINDSTR /R /c:".*\\bin\\.*\\de$" /c:".*\\bin\\.*\\en$" /c:".*\\bin\\.*\\es$" /c:".*\\bin\\.*\\fr$" /c:".*\\bin\\.*\\it$" /c:".*\\bin\\.*\\ja$" /c:".*\\bin\\.*\\ko$" /c:".*\\bin\\.*\\ru$" /c:".*\\bin\\.*\\zh-Hans$" /c:".*\\bin\\.*\\zh-Hant$" /c:".*\\bin\\.*\\pl$" /c:".*\\bin\\.*\\zh-CN$"`) do (RMDIR /Q /S "%%A" &amp; cmd /c "exit /b 0")</PostBuildEvent>

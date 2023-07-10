@@ -10,6 +10,7 @@ using System.Windows;
 using Microsoft.Win32;
 using TrustedUninstaller.Shared;
 using TrustedUninstaller.Shared.Actions;
+using TrustedUninstaller.Shared.Tasks;
 
 namespace TrustedUninstaller.CLI
 {
@@ -40,13 +41,12 @@ namespace TrustedUninstaller.CLI
 
             if (args.Length < 1 || !Directory.Exists(args[0]))
             {
-                Console.WriteLine("No Playbook selected: Use the GUI to select a playbook to run.");
+                Console.WriteLine("No Playbook selected.");
                 return -1;
             }
             
             AmeliorationUtil.Playbook = await AmeliorationUtil.DeserializePlaybook(args[0]);
-            AmeliorationUtil.Playbook.Path = args[0];
-
+            
             if (!Directory.Exists($"{AmeliorationUtil.Playbook.Path}\\Configuration") || Directory.GetFiles($"{AmeliorationUtil.Playbook.Path}\\Configuration").Length == 0)
             {
                 Console.WriteLine("Configuration folder is empty, put YAML files in it and restart the application.");
@@ -54,6 +54,9 @@ namespace TrustedUninstaller.CLI
                 return -1;
             }
             ExtractResourceFolder("resources", Directory.GetCurrentDirectory());
+            
+            
+            
             if (!WinUtil.IsTrustedInstaller())
             {
                 Console.WriteLine("Checking requirements...\r\n");
@@ -71,20 +74,30 @@ namespace TrustedUninstaller.CLI
                         Console.WriteLine("All 4 windows security toggles must be set to off.\r\nNavigate to Windows Security > Virus & threat detection > manage settings.\r\nPress any key to continue...");
                         Console.ReadKey();
                     }
-                    Console.WriteLine("The system must be prepared before continuing Your system will restart after preparation\r\nPress any key to continue...");
+                    
+                    bool remnantsOnly = Requirements.DefenderDisabled.RemnantsOnly();
+                    
+                    Console.WriteLine(remnantsOnly ? "The system must be prepared before continuing.\r\nPress any key to continue..." : "The system must be prepared before continuing. Your system will restart after preparation\r\nPress any key to continue...");
                     Console.ReadKey();
                     try
                     {
-                        WinUtil.PrepareSystemCLI();
-                        CmdAction reboot = new CmdAction()
+                        Console.WriteLine("\r\nPreparing system...");
+                        PrepareSystemCLI();
+                        Console.WriteLine("Preparation Complete");
+
+                        if (!remnantsOnly)
                         {
-                            Command = "timeout /t 1 & shutdown /r /t 0",
-                            Wait = false
-                        };
+                            Console.WriteLine("\r\nRestarting system...");
+                            CmdAction reboot = new CmdAction()
+                            {
+                                Command = "timeout /t 1 & shutdown /r /t 0",
+                                Wait = false
+                            };
 
-                        AmeliorationUtil.SafeRunAction(reboot).Wait();
+                            AmeliorationUtil.SafeRunAction(reboot).Wait();
 
-                        Environment.Exit(0);
+                            Environment.Exit(0);
+                        }
                     } catch (Exception e)
                     {
                         Console.WriteLine("Error preparing system: " + e.Message);
@@ -96,9 +109,33 @@ namespace TrustedUninstaller.CLI
                 {
                     Console.WriteLine("Internet must be connected to run this Playbook.");
                 }
-
             }
-            
+
+            if (!File.Exists($"{AmeliorationUtil.Playbook.Path}\\options.txt"))
+            {
+                List<string> defaultOptions = new List<string>();
+                foreach (var page in AmeliorationUtil.Playbook.FeaturePages)
+                {
+                    if (page.DependsOn != null && !defaultOptions.Contains(page.DependsOn))
+                        continue;
+
+                    if (page.GetType() == typeof(Playbook.CheckboxPage))
+                    {
+                        foreach (var option in ((Playbook.CheckboxPage)page).Options.Where(x => ((Playbook.CheckboxPage.CheckboxOption)x).IsChecked))
+                        {
+                            defaultOptions.Add(option.Name);
+                        }
+                    }
+
+                    if (page.GetType() == typeof(Playbook.RadioPage))
+                        defaultOptions.Add(((Playbook.RadioPage)page).DefaultOption);
+                    if (page.GetType() == typeof(Playbook.RadioImagePage))
+                        defaultOptions.Add(((Playbook.RadioImagePage)page).DefaultOption);
+                }
+
+                AmeliorationUtil.Playbook.Options = defaultOptions;
+            }
+
             try
             {
                 if (!Directory.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ame-assassin")))
@@ -227,8 +264,7 @@ namespace TrustedUninstaller.CLI
                 }
             }
         }
-         
-         
+        
         public static async Task<List<bool>> GetDefenderToggles()
         {
             var result = new List<bool>();
@@ -337,6 +373,114 @@ namespace TrustedUninstaller.CLI
                 }
             });
             return result;
+        }
+        
+        public static void PrepareSystemCLI()
+        {
+            try
+            {
+                var defenderStop = new RunAction()
+                {
+                    RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                    Exe = $"NSudoLC.exe",
+                    Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait cmd /c \"" +
+                                "sc sdset \"WinDefend\" \"D:(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWRPLOCRRC;;;BA)(A;;CCLCSWRPLOCRRC;;;BU)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWRPLOCRRC;;;SU)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)\"&" +
+                                "sc config WinDefend start=disabled&" +
+                                "net stop WinDefend\"",
+                    CreateWindow = false,
+                    Timeout = 7500,
+                };
+                defenderStop.RunTask().Wait();
+            } catch (Exception e)
+            {
+            }
+
+            var defenderValues = new RunAction()
+            {
+                RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                Exe = $"NSudoLC.exe",
+                Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait cmd /c \"reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"ProductAppDataPath\" /f &" +
+                            " reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"InstallLocation\" /f\"",
+                CreateWindow = false
+            };
+            defenderValues.RunTask().Wait();
+
+            var defenderKey = Registry.LocalMachine.OpenSubKey("SOFTWARE\\Microsoft\\Windows Defender");
+            if (defenderKey != null && defenderKey.GetValueNames().Contains("InstallLocation"))
+            {
+                throw new Exception("Could not remove defender install values.");
+            }
+            
+            var defenderService = new RunAction()
+            {
+                RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                Exe = $"NSudoLC.exe",
+                Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend\" /f",
+                CreateWindow = false
+            };
+            defenderService.RunTask().Wait();
+
+            if (Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Services\\WinDefend") != null)
+            {
+                var disableDefender = new RunAction()
+                {
+                    RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                    Exe = $"NSudoLC.exe",
+                    Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend\" /v \"Start\" /t REG_DWORD /d 4 /f",
+                    CreateWindow = false
+                };
+                disableDefender.RunTask().Wait();
+                                
+                if (new RegistryValueAction() {KeyName = @"SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD}.GetStatus() != UninstallTaskStatus.Completed)
+                    throw new Exception("Could not disable WinDefend service.");
+            }
+
+            // MpOAV.dll normally in use by a lot of processes. This prevents that.
+            var MpOAVCLSID = new RunAction()
+            {
+                RawPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                Exe = $"NSudoLC.exe",
+                Arguments = @"-U:T -P:E -M:S -Priority:RealTime -ShowWindowMode:Hide -Wait reg delete ""HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32"" /f",
+                CreateWindow = false
+            };
+            MpOAVCLSID.RunTask().Wait();
+
+            if (Registry.ClassesRoot.OpenSubKey(@"CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32") != null)
+            {
+                throw new Exception("Could not remove MpOAV mapping.");
+            }
+
+            // Can cause ProcessHacker driver warnings without this
+            AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+            {
+                KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
+                Value = "Enabled",
+                Data = 0,
+            }).Wait();
+            AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+            {
+                KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config",
+                Value = "VulnerableDriverBlocklistEnable",
+                Data = 0,
+            }).Wait();
+        }
+        
+        public static async Task UninstallDriver()
+        {
+            CmdAction cmdAction = new CmdAction();
+            try
+            {
+                Console.WriteLine("Removing driver...");
+                cmdAction.Command = Environment.Is64BitOperatingSystem
+                    ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -uninstallkph"
+                    : $"ProcessHacker\\x86\\ProcessHacker.exe -s -uninstallkph";
+                await cmdAction.RunTask();
+            }
+            catch (Exception e)
+            {
+                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "ProcessHacker ran into an Error while uninstalling the driver.");
+                throw;
+            }
         }
     }
 }

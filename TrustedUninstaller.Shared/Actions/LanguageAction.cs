@@ -6,7 +6,7 @@ using TrustedUninstaller.Shared.Tasks;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    class LanguageAction : ITaskAction
+    class LanguageAction : TaskAction, ITaskAction
     {
         public int ProgressWeight { get; set; } = 1;
         public int GetProgressWeight() => ProgressWeight;

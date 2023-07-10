@@ -4,17 +4,20 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Management;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.ServiceProcess;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Windows;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class FileAction : ITaskAction
+    public class FileAction : TaskAction, ITaskAction
     {
         [YamlMember(typeof(string), Alias = "path")]
         public string RawPath { get; set; }
@@ -71,6 +74,9 @@ namespace TrustedUninstaller.Shared.Actions
             return isFile || isDirectory ? UninstallTaskStatus.ToDo : UninstallTaskStatus.Completed;
         }
         
+        [DllImport("Unlocker.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
+        private static extern bool EzUnlockFileW(string path);
+        
         private async Task DeleteFile(string file, bool log = false)
         {
             if (!TrustedInstaller)
@@ -79,15 +85,36 @@ namespace TrustedUninstaller.Shared.Actions
                     
                 if (File.Exists(file))
                 {
+                    try
+                    {
+                        EzUnlockFileW(file);
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorLogger.WriteToErrorLog($"Error while unlocking file: " + e.Message, e.StackTrace,
+                            $"FileAction Error", file);
+                    }
+                    
+                    try {await Task.Run(() => File.Delete(file));} catch {}
+                    
                     CmdAction delAction = new CmdAction()
                     {
-                        Command = $"del /q /f {file}"
+                        Command = $"del /q /f \"{file}\""
                     };
                     await delAction.RunTask();
                 }
             }
             else if (File.Exists("NSudoLC.exe"))
             {
+                try
+                {
+                    EzUnlockFileW(file);
+                }
+                catch (Exception e)
+                {
+                    ErrorLogger.WriteToErrorLog($"Error while unlocking file: " + e.Message, e.StackTrace,
+                        $"FileAction Error", file);
+                }                
                 RunAction tiDelAction = new RunAction()
                 {
                     Exe = "NSudoLC.exe",
@@ -259,14 +286,18 @@ namespace TrustedUninstaller.Shared.Actions
                             Console.WriteLine($"\r\nError: Could not get amount of services locking file.\r\nException: " + e.Message);
                         }
                     }
-                    if (svcCount > 8) Console.WriteLine("Amount of locking services exceeds 8, skipping...");
-                        
-                    while (processes.Any() && delay <= 800 && svcCount <= 8)
+                    
+                    while (processes.Any() && delay <= 800)
                     {
                         Console.WriteLine("Processes locking the file:");
                         foreach (var process in processes)
                         {
                             Console.WriteLine(process.ProcessName);
+                        }
+                        if (svcCount > 10)
+                        {
+                            Console.WriteLine("Amount of locking services exceeds 10, skipping...");
+                            break;
                         }
 
                         foreach (var process in processes)
