@@ -431,7 +431,7 @@ namespace TrustedUninstaller.CLI
                 };
                 disableDefender.RunTask().Wait();
                                 
-                if (new RegistryValueAction() {KeyName = @"SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD}.GetStatus() != UninstallTaskStatus.Completed)
+                if (new RegistryValueAction() {KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD}.GetStatus() != UninstallTaskStatus.Completed)
                     throw new Exception("Could not disable WinDefend service.");
             }
 

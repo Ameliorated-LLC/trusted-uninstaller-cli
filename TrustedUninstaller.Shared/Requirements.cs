@@ -217,7 +217,7 @@ namespace TrustedUninstaller.Shared
             {
                 try
                 {
-                    if (Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\WinDefend") != null && new RegistryValueAction() { KeyName = @"SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }.GetStatus() != UninstallTaskStatus.Completed)
+                    if (Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\WinDefend") != null && new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }.GetStatus() != UninstallTaskStatus.Completed)
                         return false;
                     
                     if (Registry.ClassesRoot.OpenSubKey(@"CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32") != null) return false;
