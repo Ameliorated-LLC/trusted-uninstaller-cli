@@ -4,8 +4,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security;
+using System.Security.Principal;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using System.Windows;
 using Microsoft.Win32;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
@@ -33,6 +35,36 @@ namespace TrustedUninstaller.Shared.Actions
         [YamlMember(typeof(string), Alias = "weight")]
         public int ProgressWeight { get; set; } = 1;
         public int GetProgressWeight() => ProgressWeight;
+        
+        static Dictionary<RegistryHive, UIntPtr> HiveKeys = new Dictionary<RegistryHive, UIntPtr> {
+            { RegistryHive.ClassesRoot, new UIntPtr(0x80000000u) },
+            { RegistryHive.CurrentConfig, new UIntPtr(0x80000005u) },
+            { RegistryHive.CurrentUser, new UIntPtr(0x80000001u) },
+            { RegistryHive.DynData, new UIntPtr(0x80000006u) },
+            { RegistryHive.LocalMachine, new UIntPtr(0x80000002u) },
+            { RegistryHive.PerformanceData, new UIntPtr(0x80000004u) },
+            { RegistryHive.Users, new UIntPtr(0x80000003u) }
+        };
+        [DllImport("advapi32.dll", SetLastError = true)]
+        private static extern int RegOpenKeyEx(UIntPtr hKey, string subKey, int ulOptions, int samDesired, out UIntPtr hkResult);
+  
+        [DllImport("advapi32.dll", EntryPoint = "RegDeleteKeyEx", SetLastError = true)]
+        private static extern int RegDeleteKeyEx(
+            UIntPtr hKey,
+            string lpSubKey,
+            uint samDesired, // see Notes below
+            uint Reserved);
+        private static void DeleteKeyTreeWin32(string key, RegistryHive hive)
+        {
+            var openedKey = RegistryKey.OpenBaseKey(hive, RegistryView.Default).OpenSubKey(key);
+            if (openedKey == null)
+                return;
+
+            openedKey.GetSubKeyNames().ToList().ForEach(subKey => DeleteKeyTreeWin32(key + "\\" + subKey, hive));
+            openedKey.Close();
+
+            RegDeleteKeyEx(HiveKeys[hive], key, 0x0100, 0);
+        }
         
         private bool InProgress { get; set; }
         public void ResetProgress() => InProgress = false;
@@ -153,7 +185,7 @@ namespace TrustedUninstaller.Shared.Actions
         public async Task<bool> RunTask()
         {
             Console.WriteLine($"{Operation.ToString().TrimEnd('e')}ing registry key '{KeyName}'...");
-
+            
             var roots = GetRoots();
 
             foreach (var _root in roots)
@@ -184,7 +216,26 @@ namespace TrustedUninstaller.Shared.Actions
                     }
                     if (Operation == RegistryKeyOperation.Delete)
                     {
-                        root.DeleteSubKeyTree(subKey, false);
+                        try
+                        {
+                            root.DeleteSubKeyTree(subKey, false);
+                        }
+                        catch (Exception e)
+                        {
+                            ErrorLogger.WriteToErrorLog(e.GetType() + ": " + e.Message,
+                                e.StackTrace, "RegistryKeyAction Warning", root?.Name + "\\" + subKey);
+
+                            var rootHive = root.Name.Split('\\').First() switch
+                            {
+                                "HKEY_CURRENT_USER" => RegistryHive.CurrentUser,
+                                "HKEY_LOCAL_MACHINE" => RegistryHive.LocalMachine,
+                                "HKEY_CLASSES_ROOT" => RegistryHive.ClassesRoot,
+                                "HKEY_USERS" => RegistryHive.Users,
+                                _ => throw new ArgumentException($"Unable to parse: " + root.Name.Split('\\').First())
+                            };
+                            
+                            DeleteKeyTreeWin32(root.Name.StartsWith("HKEY_USERS") ? root.Name.Split('\\')[1] + "\\" + subKey: subKey, rootHive);
+                        }
                     }
                 }
                 catch (Exception e)

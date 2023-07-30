@@ -95,6 +95,7 @@
     <Compile Include="Actions\UserAction.cs" />
     <Compile Include="Actions\WriteStatusAction.cs" />
     <Compile Include="AmeliorationUtil.cs" />
+    <Compile Include="Defender.cs" />
     <Compile Include="DualOut.cs" />
     <Compile Include="Globals.cs" />
     <Compile Include="Playbook.cs" />
