@@ -37,14 +37,14 @@ namespace TrustedUninstaller.Shared
             return Parser.Tasks.Sum(task => task.Actions.Sum(action =>
             {
                 var taskAction = (TaskAction)action;
-                if (!String.IsNullOrEmpty(taskAction.Option) && (options == null ||
-                        (taskAction.Option.StartsWith("!") && options.Contains(taskAction.Option.Substring(1), StringComparer.OrdinalIgnoreCase)) ||
-                        (!options.Contains(taskAction.Option, StringComparer.OrdinalIgnoreCase))))
+                if (!String.IsNullOrEmpty(taskAction.Option) && 
+                    (taskAction.Option.StartsWith("!") && options != null && options.Contains(taskAction.Option.Substring(1), StringComparer.OrdinalIgnoreCase) || 
+                     !taskAction.Option.StartsWith("!") && options != null && !options.Contains(taskAction.Option, StringComparer.OrdinalIgnoreCase)))
                     return 0;
 
-                if (!String.IsNullOrEmpty(taskAction.Arch) && (
-                        (taskAction.Arch.StartsWith("!") && String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase)) ||
-                        (!String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase))))
+                if (!String.IsNullOrEmpty(taskAction.Arch) && 
+                    (taskAction.Arch.StartsWith("!") && String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase) || 
+                     !taskAction.Arch.StartsWith("!") && !String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase)))
                     return 0;
                 
                 return action.GetProgressWeight();
@@ -203,14 +203,14 @@ namespace TrustedUninstaller.Shared
                 {
                     var taskAction = (TaskAction)action;
 
-                    if (!String.IsNullOrEmpty(taskAction.Option) && (Playbook.Options == null || 
-                            (taskAction.Option.StartsWith("!") && Playbook.Options.Contains(taskAction.Option.Substring(1), StringComparer.OrdinalIgnoreCase)) || 
-                            (!Playbook.Options.Contains(taskAction.Option, StringComparer.OrdinalIgnoreCase))))
+                    if (!String.IsNullOrEmpty(taskAction.Option) &&
+                            (taskAction.Option.StartsWith("!") && Playbook.Options != null && Playbook.Options.Contains(taskAction.Option.Substring(1), StringComparer.OrdinalIgnoreCase) ||
+                             !taskAction.Option.StartsWith("!") && Playbook.Options != null && !Playbook.Options.Contains(taskAction.Option, StringComparer.OrdinalIgnoreCase)))
                         continue;
                     
-                    if (!String.IsNullOrEmpty(taskAction.Arch) && (
-                            (taskAction.Arch.StartsWith("!") && String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase)) ||
-                            (!String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase))))
+                    if (!String.IsNullOrEmpty(taskAction.Arch) &&
+                            (taskAction.Arch.StartsWith("!") && String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase) ||
+                             !taskAction.Arch.StartsWith("!") && !String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase)))
                         continue;
                     
                     int i = 0;
@@ -238,7 +238,7 @@ namespace TrustedUninstaller.Shared
                                 else
                                 {
                                     ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, action.ErrorString());
-                                    List<string> ExceptionBreakList = new List<string>() { "System.ArgumentException", "System.SecurityException", "System.UnauthorizedAccessException", "System.UnauthorizedAccessException", "System.TimeoutException" };
+                                    List<string> ExceptionBreakList = new List<string>() { "System.ArgumentException", "System.SecurityException", "System.UnauthorizedAccessException", "System.TimeoutException" };
                                     if (ExceptionBreakList.Any(x => x.Equals(e.GetType().ToString())))
                                     {
                                         i = 10;
