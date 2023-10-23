@@ -38,6 +38,7 @@ namespace TrustedUninstaller.Shared.Actions
 
     public class RegistryValueAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "path")]
         public string KeyName { get; set; }
 

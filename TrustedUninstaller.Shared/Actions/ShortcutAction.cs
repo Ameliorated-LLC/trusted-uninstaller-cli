@@ -10,6 +10,7 @@ namespace TrustedUninstaller.Shared.Actions
 {
     class ShortcutAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "path")]
         public string RawPath { get; set; }
 

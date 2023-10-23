@@ -27,8 +27,10 @@ namespace TrustedUninstaller.Shared
         private static readonly ConfigParser Parser = new ConfigParser();
 
         private static readonly HttpClient Client = new HttpClient();
-        
-        public static Playbook Playbook { set; get; }
+
+        public static Playbook Playbook { set; get; } = new Playbook();
+
+        public static bool UseKernelDriver = false;
 
         public static readonly List<string> ErrorDisplayList = new List<string>();
 
@@ -37,16 +39,19 @@ namespace TrustedUninstaller.Shared
             return Parser.Tasks.Sum(task => task.Actions.Sum(action =>
             {
                 var taskAction = (TaskAction)action;
-                if (!String.IsNullOrEmpty(taskAction.Option) && 
-                    (taskAction.Option.StartsWith("!") && options != null && options.Contains(taskAction.Option.Substring(1), StringComparer.OrdinalIgnoreCase) || 
-                     !taskAction.Option.StartsWith("!") && options != null && !options.Contains(taskAction.Option, StringComparer.OrdinalIgnoreCase)))
+                if ((!IsApplicableOption(taskAction.Option, options) || !IsApplicableArch(taskAction.Arch)) ||
+                    (taskAction.Builds != null && (
+                        !taskAction.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
+                        ||
+                        taskAction.Builds.Where(build => build.StartsWith("!")).Any(build => !IsApplicableWindowsVersion(build)))) ||
+                    (taskAction.Options != null && (
+                        !taskAction.Options.Where(option => !option.StartsWith("!")).Any(option => IsApplicableOption(option, Playbook.Options))
+                        ||
+                        taskAction.Options.Where(option => option.StartsWith("!")).Any(option => !IsApplicableOption(option, Playbook.Options)))))
+                {
                     return 0;
+                }
 
-                if (!String.IsNullOrEmpty(taskAction.Arch) && 
-                    (taskAction.Arch.StartsWith("!") && String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase) || 
-                     !taskAction.Arch.StartsWith("!") && !String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase)))
-                    return 0;
-                
                 return action.GetProgressWeight();
             }));
         }
@@ -74,6 +79,21 @@ namespace TrustedUninstaller.Shared
                         return true;
                     }
                 }
+
+                if ((!IsApplicableOption(currentTask.Option, Playbook.Options) || !IsApplicableArch(currentTask.Arch)) ||
+                    (currentTask.Builds != null && (
+                        !currentTask.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
+                        ||
+                        currentTask.Builds.Where(build => build.StartsWith("!")).Any(build => !IsApplicableWindowsVersion(build)))) ||
+                    (currentTask.Options != null && (
+                        !currentTask.Options.Where(option => !option.StartsWith("!")).Any(option => IsApplicableOption(option, Playbook.Options))
+                        ||
+                        currentTask.Options.Where(option => option.StartsWith("!")).Any(option => !IsApplicableOption(option, Playbook.Options)))))
+                {
+                    Parser.Tasks.Remove(currentTask);
+                    return true;
+                }
+                    
 
                 //Get the features of the last added task (the task that was just added from the config file)
                 var features = currentTask.Features;
@@ -203,15 +223,18 @@ namespace TrustedUninstaller.Shared
                 {
                     var taskAction = (TaskAction)action;
 
-                    if (!String.IsNullOrEmpty(taskAction.Option) &&
-                            (taskAction.Option.StartsWith("!") && Playbook.Options != null && Playbook.Options.Contains(taskAction.Option.Substring(1), StringComparer.OrdinalIgnoreCase) ||
-                             !taskAction.Option.StartsWith("!") && Playbook.Options != null && !Playbook.Options.Contains(taskAction.Option, StringComparer.OrdinalIgnoreCase)))
+                    if ((!IsApplicableOption(taskAction.Option, Playbook.Options) || !IsApplicableArch(taskAction.Arch)) ||
+                        (taskAction.Builds != null && (
+                            !taskAction.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
+                            ||
+                            taskAction.Builds.Where(build => build.StartsWith("!")).Any(build => !IsApplicableWindowsVersion(build)))) ||
+                        (taskAction.Options != null && (
+                            !taskAction.Options.Where(option => !option.StartsWith("!")).Any(option => IsApplicableOption(option, Playbook.Options))
+                            ||
+                            taskAction.Options.Where(option => option.StartsWith("!")).Any(option => !IsApplicableOption(option, Playbook.Options)))))
+                    {
                         continue;
-                    
-                    if (!String.IsNullOrEmpty(taskAction.Arch) &&
-                            (taskAction.Arch.StartsWith("!") && String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase) ||
-                             !taskAction.Arch.StartsWith("!") && !String.Equals(taskAction.Arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase)))
-                        continue;
+                    }
                     
                     int i = 0;
 
@@ -225,7 +248,10 @@ namespace TrustedUninstaller.Shared
                             Console.WriteLine();
                             try
                             {
-                                await action.RunTask();
+                                var actionTask = action.RunTask();
+                                if (actionTask == null)
+                                    action.RunTaskOnMainThread();
+                                else await actionTask;
                                 action.ResetProgress();
                             }
                             catch (Exception e)
@@ -274,6 +300,8 @@ namespace TrustedUninstaller.Shared
                     Console.WriteLine($"Action completed. Weight:{action.GetProgressWeight()}");
                 }
                 Console.WriteLine("Task completed.");
+                
+                ProcessPrivilege.ResetTokens();
                 
                 File.AppendAllText("TasksAdded.txt", task.Title + Environment.NewLine);
             }
@@ -434,20 +462,20 @@ namespace TrustedUninstaller.Shared
             Console.WriteLine($"{deletedItemsCount} files were deleted successfully. " +
                 $"{failedDeletedItemsCount} files couldn't be deleted.");
 
-
             //Check if the kernel driver is installed.
             //service = ServiceController.GetDevices()
                 //.FirstOrDefault(s => s.DisplayName == "KProcessHacker2");
-            if (true)
+            if (UseKernelDriver)
             { 
                 //Remove Process Hacker's kernel driver.
                 await WinUtil.UninstallDriver();
+                
+                await AmeliorationUtil.SafeRunAction(new RegistryKeyAction()
+                {
+                    KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2",
+                });
             }
-            await AmeliorationUtil.SafeRunAction(new RegistryKeyAction()
-            {
-                KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2",
-            });
-
+            
             File.Delete("TasksAdded.txt");
             
             Console.WriteLine();
@@ -624,6 +652,95 @@ namespace TrustedUninstaller.Shared
                         throw new ArgumentOutOfRangeException();
                 }
             }
+        }
+
+        private static bool IsApplicableWindowsVersion(string version)
+        {
+            bool negative = false;
+            if (version.StartsWith("!"))
+            {
+                version = version.TrimStart('!');
+                negative = true;
+            }
+
+            bool compareUpdateBuild = version.Contains(".");
+            var currentBuild = decimal.Parse(compareUpdateBuild ? Globals.WinVer + "." + Globals.WinUpdateVer : Globals.WinVer.ToString());
+
+            bool result = false;
+            if (version.StartsWith(">="))
+            {
+                var parsed = decimal.Parse(version.Substring(2));
+                if (currentBuild >= parsed)
+                    result = true;
+            } else if (version.StartsWith("<="))
+            {
+                var parsed = decimal.Parse(version.Substring(2));
+                if (currentBuild <= parsed)
+                    result = true;
+            } else if (version.StartsWith(">"))
+            {
+                var parsed = decimal.Parse(version.Substring(1));
+                if (currentBuild > parsed)
+                    result = true;
+            } else if (version.StartsWith("<"))
+            {
+                var parsed = decimal.Parse(version.Substring(1));
+                if (currentBuild < parsed)
+                    result = true;
+            }
+            else
+            {
+                var parsed = decimal.Parse(version);
+                if (currentBuild == parsed)
+                    result = true;
+            }
+
+            return negative ? !result : result;
+        }
+        
+        private static bool IsApplicableOption(string option, List<string> options)
+        {
+            if (String.IsNullOrEmpty(option))
+                return true;
+
+            if (option.Contains("&"))
+            {
+                if (option.Contains("!"))
+                    throw new ArgumentException("YAML options item must not contain both & and !", "options");
+
+                return option.Split('&').All(splitOption => IsApplicableOption(splitOption, options));
+            }
+            
+            bool negative = false;
+            if (option.StartsWith("!"))
+            {
+                option = option.TrimStart('!');
+                negative = true;
+            }
+            
+            if (options == null)
+                return negative ? true : false;
+
+            var result = options.Contains(option, StringComparer.OrdinalIgnoreCase);
+
+            return negative ? !result : result;
+        }
+        
+        private static bool IsApplicableArch(string arch)
+        {
+            if (String.IsNullOrEmpty(arch))
+                return true;
+            
+            bool negative = false;
+            if (arch.StartsWith("!"))
+            {
+                arch = arch.TrimStart('!');
+                negative = true;
+            }
+
+            var result = String.Equals(arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase);
+
+            return negative ? !result : result;
         }
         
         public static async Task<bool> SafeRunAction(ITaskAction action)

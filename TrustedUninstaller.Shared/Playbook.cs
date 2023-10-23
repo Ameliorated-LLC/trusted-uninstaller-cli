@@ -5,7 +5,6 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Management.Automation.Runspaces;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -53,6 +52,8 @@ namespace TrustedUninstaller.Shared
         public bool Overhaul { get; set; } = false;
 
         public string Path { get; set; }
+        
+        public bool? UseKernelDriver { get; set; } = null;
 
         public List<string> Options { get; set; } = null;
 

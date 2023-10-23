@@ -7,6 +7,7 @@ namespace TrustedUninstaller.Shared.Actions
 {
     public class WriteStatusAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "status")]
         public string Status { get; set; }
         private bool InProgress { get; set; }

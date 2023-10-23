@@ -132,7 +132,7 @@ namespace TrustedUninstaller.Shared
                     Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait cmd /c \"reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"ProductAppDataPath\" /f &" +
                         " reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"InstallLocation\" /f\"",
                     CreateWindow = false
-                }.RunTask().Wait();
+                }.RunTaskOnMainThread();
 
                 if (new RegistryValueAction() { KeyName = "HKLM\\SOFTWARE\\Microsoft\\Windows Defender", Value = "InstallLocation", Operation = RegistryValueOperation.Delete }.GetStatus() !=
                     UninstallTaskStatus.Completed)
@@ -157,7 +157,7 @@ namespace TrustedUninstaller.Shared
                     Exe = $"NSudoLC.exe",
                     Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend\" /f",
                     CreateWindow = false
-                }.RunTask().Wait();
+                }.RunTaskOnMainThread();
 
                 if (new RegistryKeyAction() { KeyName = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend" }.GetStatus() !=
                     UninstallTaskStatus.Completed)
@@ -183,7 +183,7 @@ namespace TrustedUninstaller.Shared
                             Exe = $"NSudoLC.exe",
                             Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend\" /v \"Start\" /t REG_DWORD /d 4 /f",
                             CreateWindow = false
-                        }.RunTask().Wait();
+                        }.RunTaskOnMainThread();
 
                         if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }.GetStatus() !=
                             UninstallTaskStatus.Completed)
@@ -211,7 +211,7 @@ namespace TrustedUninstaller.Shared
                     Exe = $"NSudoLC.exe",
                     Arguments = @"-U:T -P:E -M:S -Priority:RealTime -ShowWindowMode:Hide -Wait reg delete ""HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32"" /f",
                     CreateWindow = false
-                }.RunTask().Wait();
+                }.RunTaskOnMainThread();
 
                 if (new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32" }.GetStatus() !=
                     UninstallTaskStatus.Completed)
@@ -247,7 +247,7 @@ namespace TrustedUninstaller.Shared
                         "reg delete \"HKLM\\SOFTWARE\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.Internal.Security.SmartScreen.EventLogger\" /f &" +
                         "reg delete \"HKLM\\SOFTWARE\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.Internal.Security.SmartScreen.UriReputationService\" /f\"",
                     CreateWindow = false
-                }.RunTask().Wait();
+                }.RunTaskOnMainThread();
 
                 if (new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{a463fcb9-6b1c-4e0d-a80b-a2ca7999e25d}\InprocServer32" }.GetStatus() !=
                     UninstallTaskStatus.Completed)
@@ -275,7 +275,7 @@ namespace TrustedUninstaller.Shared
                     Arguments =
                         @"-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add ""HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"" /v Enabled /d 0 /f",
                     CreateWindow = false
-                }.RunTask().Wait();
+                }.RunTaskOnMainThread();
 
                 if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.GetStatus()
                     != UninstallTaskStatus.Completed)
@@ -302,19 +302,39 @@ namespace TrustedUninstaller.Shared
                     Arguments =
                         @"-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add ""HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"" /v Enabled /d 0 /f",
                     CreateWindow = false
-                }.RunTask().Wait();
+                }.RunTaskOnMainThread();
 
                 if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.GetStatus()
                     != UninstallTaskStatus.Completed)
                     ErrorLogger.WriteToErrorLog("Could not disable memory integrity.", null, "Defender disable warning");
             }
 
-            AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+            try
             {
-                KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config",
-                Value = "VulnerableDriverBlocklistEnable",
-                Data = 0,
-            }).Wait();
+                // Can cause ProcessHacker driver warnings without this
+                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.RunTask().Wait();
+
+                if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.GetStatus()
+                    != UninstallTaskStatus.Completed)
+                    throw new Exception("Unknown error");
+            }
+            catch (Exception e)
+            {
+                ErrorLogger.WriteToErrorLog("First blocklist disable failed: " + e.GetType() + " " + e.Message, null, "Kernel driver preparation warning");
+
+                new RunAction()
+                {
+                    RawPath = Directory.GetCurrentDirectory(),
+                    Exe = $"NSudoLC.exe",
+                    Arguments =
+                        @"-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add ""HKLM\SYSTEM\CurrentControlSet\Control\CI\Config"" /v VulnerableDriverBlocklistEnable /d 0 /f",
+                    CreateWindow = false
+                }.RunTaskOnMainThread();
+
+                if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.GetStatus()
+                    != UninstallTaskStatus.Completed)
+                    ErrorLogger.WriteToErrorLog("Could not disable blocklist.", null, "Kernel driver preparation error");
+            }
 
             return restartRequired;
         }
@@ -491,7 +511,7 @@ namespace TrustedUninstaller.Shared
                             "net stop WinDefend\"",
                         CreateWindow = false,
                         Timeout = 7500,
-                    }.RunTask().Wait();
+                    }.RunTaskOnMainThread();
                 }
 
                 return !Process.GetProcessesByName("MsMpEng").Any();
@@ -597,7 +617,7 @@ namespace TrustedUninstaller.Shared
                     tokenGroups.Groups[idx].Attributes &= ~(uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_OWNER;
                 }
             }
-            Console.WriteLine(tokenGroups.GroupCount);
+
             tokenGroups.Groups[tokenGroups.GroupCount].Sid = tiSid;
             tokenGroups.Groups[tokenGroups.GroupCount].Attributes = (uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED | (uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT;
             tokenGroups.GroupCount++;

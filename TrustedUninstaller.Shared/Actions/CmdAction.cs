@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
@@ -11,6 +13,25 @@ namespace TrustedUninstaller.Shared.Actions
 {
     public class CmdAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread()
+        {
+            if (InProgress) throw new TaskInProgressException("Another Cmd action was called while one was in progress.");
+            InProgress = true;
+            
+            Console.WriteLine($"Running cmd command '{Command}'...");
+
+            ExitCode = null;
+            
+            if (RunAs == Privilege.TrustedInstaller)
+                RunAsProcess();
+            else
+                RunAsPrivilegedProcess();
+
+            InProgress = false;
+        }
+        [YamlMember(typeof(Privilege), Alias = "runas")]
+        public Privilege RunAs { get; set; } = Privilege.TrustedInstaller;
+        
         [YamlMember(typeof(string), Alias = "command")]
         public string Command { get; set; }
         
@@ -48,21 +69,20 @@ namespace TrustedUninstaller.Shared.Actions
 
             return ExitCode == null ? UninstallTaskStatus.ToDo: UninstallTaskStatus.Completed;
         }
-        public async Task<bool> RunTask()
+        
+        public Task<bool> RunTask()
         {
-            if (InProgress) throw new TaskInProgressException("Another Cmd action was called while one was in progress.");
-            InProgress = true;
-            
-            Console.WriteLine($"Running cmd command '{Command}'...");
-            
-            ExitCode = null;
+            return null;
+        }
 
+        private void RunAsProcess()
+        {
             var process = new Process();
             var startInfo = new ProcessStartInfo
             {
                 WindowStyle = ProcessWindowStyle.Normal,
                 FileName = "cmd.exe",
-                Arguments = "/C " + $"\"{Environment.ExpandEnvironmentVariables(this.Command)}\"",
+                Arguments = "/C " + $"\"{this.Command}\"",
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,
@@ -83,7 +103,7 @@ namespace TrustedUninstaller.Shared.Actions
             if (!Wait)
             {
                 process.Dispose();
-                return true;
+                return;
             }
             
             var error = new StringBuilder();
@@ -97,6 +117,114 @@ namespace TrustedUninstaller.Shared.Actions
             };
             
             process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            if (Timeout != null)
+            {
+                var exited = process.WaitForExit(Timeout.Value);
+                if (!exited)
+                {
+                    process.Kill();
+                    throw new TimeoutException($"Command '{Command}' timeout exceeded.");
+                }
+            }
+            else
+            {
+                bool exited = process.WaitForExit(30000);
+
+                // WaitForExit alone seems to not be entirely reliable
+                while (!exited && CmdRunning(process.Id))
+                {
+                    exited = process.WaitForExit(30000);
+                }
+            }
+            
+            int exitCode = 0;
+            try
+            {
+                exitCode = process.ExitCode;
+            }
+            catch (Exception ex)
+            {
+                ErrorLogger.WriteToErrorLog("Error fetching process exit code. (1)", null, "CmdAction Error", Command);
+            }
+            
+            if (exitCode != 0)
+            {
+                StandardError = error.ToString();
+                Console.WriteLine($"cmd instance exited with error code: {exitCode}");
+                if (!String.IsNullOrEmpty(StandardError)) Console.WriteLine($"Error message: {StandardError}");
+                
+                ErrorLogger.WriteToErrorLog("Cmd exited with a non-zero exit code: " + exitCode, null, "CmdAction Error", Command);
+                
+                this.ExitCode = exitCode;
+            }
+            else
+            {
+                ExitCode = 0;
+            }
+            
+            process.CancelOutputRead();
+            process.CancelErrorRead();
+            process.Dispose();
+        }
+        
+        private static bool CmdRunning(int id)
+        {
+            try
+            {
+                return Process.GetProcessesByName("cmd").Any(x => x.Id == id);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+        
+        private void RunAsPrivilegedProcess()
+        {
+            
+            var process = new AugmentedProcess.Process();
+            var startInfo = new AugmentedProcess.ProcessStartInfo
+            {
+                WindowStyle = ProcessWindowStyle.Normal,
+                FileName = "cmd.exe",
+                Arguments = "/C " + $"\"{Environment.ExpandEnvironmentVariables(this.Command)}\"",
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+            if (ExeDir) startInfo.WorkingDirectory = AmeliorationUtil.Playbook.Path + "\\Executables";
+            if (!Wait)
+            {
+                startInfo.RedirectStandardError = false;
+                startInfo.RedirectStandardOutput = false;
+                startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+                startInfo.UseShellExecute = true;
+            }
+                
+            process.StartInfo = startInfo;
+            ProcessPrivilege.StartPrivilegedTask(process, RunAs);
+                
+            if (!Wait)
+            {
+                process.Dispose();
+                return;
+            }
+            
+            var error = new StringBuilder();
+            process.OutputDataReceived += PrivilegedProcOutputHandler;
+            process.ErrorDataReceived += delegate(object sender, AugmentedProcess.DataReceivedEventArgs args)
+            {
+                if (!String.IsNullOrEmpty(args.Data))
+                    error.AppendLine(args.Data);
+                else
+                    error.AppendLine();
+            };
+            
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
 
             if (Timeout != null)
             {
@@ -127,14 +255,29 @@ namespace TrustedUninstaller.Shared.Actions
             }
             
             process.CancelOutputRead();
+            process.CancelErrorRead();
             process.Dispose();
-
-            InProgress = false;
-            return true;
         }
+        
+        private void PrivilegedProcOutputHandler(object sendingProcess, AugmentedProcess.DataReceivedEventArgs outLine)
+        {
+            var outputString = outLine.Data;
 
-        private static void ProcOutputHandler(object sendingProcess,
-         DataReceivedEventArgs outLine)
+            // Collect the sort command output. 
+            if (!String.IsNullOrEmpty(outLine.Data))
+            {
+                if (outputString.Contains("\\AME"))
+                {
+                    outputString = outputString.Substring(outputString.IndexOf('>') + 1);
+                }
+                Console.WriteLine(outputString);
+            }
+            else
+            {
+                Console.WriteLine();
+            }
+        }
+        private void ProcOutputHandler(object sendingProcess, DataReceivedEventArgs outLine)
         {
             var outputString = outLine.Data;
 

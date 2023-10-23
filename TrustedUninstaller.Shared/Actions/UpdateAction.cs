@@ -10,6 +10,7 @@ namespace TrustedUninstaller.Shared.Actions
 {
     internal class UpdateAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "name")]
         public string PackageName { get; set; }
         

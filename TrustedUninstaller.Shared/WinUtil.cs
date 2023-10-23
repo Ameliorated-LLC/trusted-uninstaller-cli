@@ -5,7 +5,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Management;
-using System.Management.Automation;
 using System.Net.Http;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -18,6 +17,7 @@ using System.Windows;
 using System.Windows.Interop;
 using Microsoft.Win32;
 using TrustedUninstaller.Shared.Actions;
+using TrustedUninstaller.Shared.Tasks;
 
 namespace TrustedUninstaller.Shared
 {
@@ -444,7 +444,7 @@ namespace TrustedUninstaller.Shared
                 if (res == ERROR_MORE_DATA)
                 {
                     // Create an array to store the process results
-                    RM_PROCESS_INFO[] processInfo = new RM_PROCESS_INFO[pnProcInfoNeeded];
+                    RM_PROCESS_INFO[] processInfo = new RM_PROCESS_INFO[pnProcInfoNeeded + 3];
                     pnProcInfo = pnProcInfoNeeded;
 
                     // Get the list
@@ -465,7 +465,7 @@ namespace TrustedUninstaller.Shared
                             catch (ArgumentException) { }
                         }
                     }
-                    else throw new Exception("Could not list processes locking resource.");
+                    else throw new Exception("Could not list processes locking resource: " + res);
                 }
                 else if (res != 0)
                     throw new Exception("Could not list processes locking resource. Could not get size of result." + $" Result value: {res}");
@@ -609,37 +609,60 @@ namespace TrustedUninstaller.Shared
         public static async Task RemoveProtectionAsync()
         {
             var cmdAction = new CmdAction();
-            if (!IsVCInstalled())
+
+            if (AmeliorationUtil.UseKernelDriver)
             {
-                Console.WriteLine(Environment.NewLine + "Installing VC 15...");
+                /*
+                if (!IsVCInstalled())
+                {
+                    Console.WriteLine(Environment.NewLine + "Installing VC 15...");
+                    try
+                    {
+                        //Install Visual C++ 2015 redistributable package silently
+                        cmdAction.Command = "vc_redist.x64.exe /q /norestart";
+                        cmdAction.RunTaskOnMainThread();
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while installing VC 15.");
+                        throw;
+                    }
+                }
+                */
+
                 try
                 {
-                    //Install Visual C++ 2015 redistributable package silently
-                    cmdAction.Command = "vc_redist.x64.exe /q /norestart";
-                    await cmdAction.RunTask();
+                    Console.WriteLine(Environment.NewLine + "Installing driver...");
+                    cmdAction.Command = Environment.Is64BitOperatingSystem
+                        ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -installkph"
+                        : $"ProcessHacker\\x86\\ProcessHacker.exe -s -installkph";
+                    cmdAction.RunTaskOnMainThread();
+
+                    await AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+                        { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Value = "DeleteFlag", Type = RegistryValueType.REG_DWORD, Data = 1 });
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while installing VC 15.");
+                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "ProcessHacker ran into an error while installing its driver.");
                     throw;
                 }
             }
+        }
 
-            try
-            {
-                Console.WriteLine(Environment.NewLine + "Installing driver...");
-                cmdAction.Command = Environment.Is64BitOperatingSystem
-                    ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -installkph"
-                    : $"ProcessHacker\\x86\\ProcessHacker.exe -s -installkph";
-                var res = await cmdAction.RunTask();
-
-            }
-            catch (Exception e)
-            {
-                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "ProcessHacker ran into an error while installing its driver.");
-                throw;
-            }
-
+        public static async void CheckKph()
+        {
+            if (!AmeliorationUtil.UseKernelDriver || new RegistryKeyAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Operation = RegistryKeyOperation.Add }.GetStatus() == UninstallTaskStatus.Completed)
+                return;
+            
+            Console.WriteLine(Environment.NewLine + "Installing driver...");
+            var cmdAction = new CmdAction();
+            cmdAction.Command = Environment.Is64BitOperatingSystem
+                ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -installkph"
+                : $"ProcessHacker\\x86\\ProcessHacker.exe -s -installkph";
+            cmdAction.RunTaskOnMainThread();
+            
+            await AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+                { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Value = "DeleteFlag", Type = RegistryValueType.REG_DWORD, Data = 1 });
         }
 
         private const int GWL_STYLE = -16;
@@ -686,6 +709,10 @@ namespace TrustedUninstaller.Shared
 
         public static async Task UninstallDriver()
         {
+            if (AmeliorationUtil.UseKernelDriver == false)
+                return;
+            AmeliorationUtil.UseKernelDriver = false;
+            
             CmdAction cmdAction = new CmdAction();
             try
             {
@@ -693,7 +720,7 @@ namespace TrustedUninstaller.Shared
                 cmdAction.Command = Environment.Is64BitOperatingSystem
                     ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -uninstallkph"
                     : $"ProcessHacker\\x86\\ProcessHacker.exe -s -uninstallkph";
-                await cmdAction.RunTask();
+                cmdAction.RunTaskOnMainThread();
             }
             catch (Exception e)
             {

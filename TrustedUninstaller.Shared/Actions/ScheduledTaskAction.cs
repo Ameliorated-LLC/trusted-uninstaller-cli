@@ -21,6 +21,7 @@ namespace TrustedUninstaller.Shared.Actions
 
     internal class ScheduledTaskAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(typeof(ScheduledTaskOperation), Alias = "operation")]
         public ScheduledTaskOperation Operation { get; set; } = ScheduledTaskOperation.Delete;
         [YamlMember(Alias = "data")]

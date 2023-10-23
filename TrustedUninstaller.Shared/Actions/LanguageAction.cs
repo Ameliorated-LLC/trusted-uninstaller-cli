@@ -1,4 +1,5 @@
-﻿using System.Linq;
+﻿using System;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -8,6 +9,7 @@ namespace TrustedUninstaller.Shared.Actions
 {
     class LanguageAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         public int ProgressWeight { get; set; } = 1;
         public int GetProgressWeight() => ProgressWeight;
         

@@ -20,5 +20,6 @@ namespace TrustedUninstaller.Shared.Tasks
         public string ErrorString();
         public UninstallTaskStatus GetStatus();
         public Task<bool> RunTask();
+        public void RunTaskOnMainThread();
     }
 }

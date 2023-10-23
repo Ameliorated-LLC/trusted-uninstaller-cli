@@ -23,6 +23,7 @@ namespace TrustedUninstaller.Shared.Actions
     }
     public class RegistryKeyAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "path")]
         public string KeyName { get; set; }
 

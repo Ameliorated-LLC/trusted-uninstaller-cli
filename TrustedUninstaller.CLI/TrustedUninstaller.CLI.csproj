@@ -70,6 +70,13 @@
     <DebugType>embedded</DebugType>
     <DefineConstants>SINGLE</DefineConstants>
   </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug Single File|x64' ">
+    <OutputPath>bin\x64\Release\</OutputPath>
+    <PlatformTarget>x64</PlatformTarget>
+    <Optimize>true</Optimize>
+    <DebugType>embedded</DebugType>
+    <DefineConstants>SINGLE;DEBUG</DefineConstants>
+  </PropertyGroup>
   <PropertyGroup>
     <ManifestCertificateThumbprint>B8F0A67800B779C5CEF49BEAB6E5247E373F9452</ManifestCertificateThumbprint>
   </PropertyGroup>
@@ -91,21 +98,19 @@
   <PropertyGroup>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Single File|x64' ">
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Single File|x64' Or '$(Configuration)|$(Platform)' == 'Debug Single File|x64' ">
     <PostBuildEvent>for /f "usebackq delims=" %%A in (`DIR /B /S /A:d "$(SolutionDir)" ^| FINDSTR /R /c:".*\\bin\\.*\\de$" /c:".*\\bin\\.*\\en$" /c:".*\\bin\\.*\\es$" /c:".*\\bin\\.*\\fr$" /c:".*\\bin\\.*\\it$" /c:".*\\bin\\.*\\ja$" /c:".*\\bin\\.*\\ko$" /c:".*\\bin\\.*\\ru$" /c:".*\\bin\\.*\\zh-Hans$" /c:".*\\bin\\.*\\zh-Hant$" /c:".*\\bin\\.*\\pl$" /c:".*\\bin\\.*\\zh-CN$"`) do (RMDIR /Q /S "%%A" &amp; cmd /c "exit /b 0")
-      cmd /c "echo Compiled&gt; "$(SolutionDir)\TrustedUninstaller.GUI\gui-builder\Compiled.txt""</PostBuildEvent>
+      PowerShell -NoP -C "Start-Process '$(SolutionDir)\TrustedUninstaller.GUI\gui-builder\ame-builder.exe' -ArgumentList 'CLI','""""x64\$(Configuration)""""' -NoNewWindow -Wait"
+    </PostBuildEvent>
+    <AllowedReferenceRelatedFileExtensions>
+      <!-- Prevent default XML files copied to output.-->
+      .allowedextension
+    </AllowedReferenceRelatedFileExtensions>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Single File|x64' ">
-    <PreBuildEvent>PowerShell -NoP -C "Get-Process 'ame-builder' -EA SilentlyContinue | Wait-Process -EA SilentlyContinue; EXIT 0"
-      PowerShell -NoP -C "Start-Process '$(SolutionDir)\TrustedUninstaller.GUI\gui-builder\ame-builder.exe' -ArgumentList 'CLI' -WindowStyle Hidden"
-    </PreBuildEvent>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' != 'Single File|x64' ">
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' != 'Single File|x64' And '$(Configuration)|$(Platform)' != 'Debug Single File|x64' ">
     <PostBuildEvent>for /f "usebackq delims=" %%A in (`DIR /B /S /A:d "$(SolutionDir)" ^| FINDSTR /R /c:".*\\bin\\.*\\de$" /c:".*\\bin\\.*\\en$" /c:".*\\bin\\.*\\es$" /c:".*\\bin\\.*\\fr$" /c:".*\\bin\\.*\\it$" /c:".*\\bin\\.*\\ja$" /c:".*\\bin\\.*\\ko$" /c:".*\\bin\\.*\\ru$" /c:".*\\bin\\.*\\zh-Hans$" /c:".*\\bin\\.*\\zh-Hant$" /c:".*\\bin\\.*\\pl$" /c:".*\\bin\\.*\\zh-CN$"`) do (RMDIR /Q /S "%%A" &amp; cmd /c "exit /b 0")</PostBuildEvent>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="Microsoft.Build" />
-    <Reference Include="PresentationFramework" />
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.IO.Compression, Version=4.1.2.0, Culture=neutral, PublicKeyToken=b77a5c561934e089, processorArchitecture=MSIL">
@@ -113,16 +118,6 @@
       <SpecificVersion>False</SpecificVersion>
       <Private>False</Private>
     </Reference>
-    <Reference Include="System.Management" />
-    <Reference Include="System.Net.Http" />
-    <Reference Include="System.Numerics" />
-    <Reference Include="System.ServiceProcess" />
-    <Reference Include="System.Windows.Forms" />
-    <Reference Include="System.Xml.Linq" />
-    <Reference Include="System.Data.DataSetExtensions" />
-    <Reference Include="Microsoft.CSharp" />
-    <Reference Include="System.Data" />
-    <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="CLI.cs" />
@@ -150,18 +145,12 @@
     </ProjectReference>
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="6.0.0" />
-    <PackageReference Include="Microsoft.PowerShell.5.ReferenceAssemblies" Version="1.1.0" />
-    <PackageReference Include="Newtonsoft.Json" Version="9.0.1" />
-    <PackageReference Include="SQLitePCLRaw.core" Version="2.0.7" />
     <PackageReference Include="System.Buffers" Version="4.5.1" />
     <PackageReference Include="System.CodeDom" Version="6.0.0" />
-    <PackageReference Include="System.IO.Compression" Version="4.0.0" />
     <PackageReference Include="System.Management" Version="6.0.0" />
     <PackageReference Include="System.Memory" Version="4.5.4" />
     <PackageReference Include="System.Numerics.Vectors" Version="4.5.0" />
     <PackageReference Include="System.Runtime.CompilerServices.Unsafe" Version="6.0.0" />
-    <PackageReference Include="System.Runtime.InteropServices.RuntimeInformation" Version="4.3.0" />
     <PackageReference Include="System.Security.Principal.Windows" Version="5.0.0" />
   </ItemGroup>
   <ItemGroup>
@@ -171,7 +160,7 @@
     <EmbeddedResource Include="Properties\resources\CLI-Resources.7z" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="Properties\resources\NSudoLC.exe" />
+    <EmbeddedResource Include="Properties\resources\ProcessInformer.7z" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

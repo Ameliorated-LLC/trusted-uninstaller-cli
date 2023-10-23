@@ -142,6 +142,30 @@ namespace TrustedUninstaller.CLI
                 AmeliorationUtil.Playbook.Options = defaultOptions;
             }
 
+            if (!AmeliorationUtil.Playbook.UseKernelDriver.HasValue)
+            {
+                if (new RegistryValueAction()
+                    {
+                        KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
+                        Value = "Enabled",
+                        Data = 1,
+                    }.GetStatus()
+                    != UninstallTaskStatus.Completed
+                    &&
+                    new RegistryValueAction()
+                    {
+                        KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config",
+                        Value = "VulnerableDriverBlocklistEnable",
+                        Data = 0,
+                    }.GetStatus()
+                    == UninstallTaskStatus.Completed && (await GetDefenderToggles()).All(toggleOn => !toggleOn))
+                {
+                    AmeliorationUtil.UseKernelDriver = true;
+                }
+            }
+            else
+                AmeliorationUtil.UseKernelDriver = AmeliorationUtil.Playbook.UseKernelDriver.Value;
+            
             try
             {
                 if (!Directory.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ame-assassin")))
@@ -150,9 +174,11 @@ namespace TrustedUninstaller.CLI
 
                     ExtractResourceFolder("resources", Directory.GetCurrentDirectory());
                     ExtractArchive(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "CLI-Resources.7z"), AppDomain.CurrentDomain.BaseDirectory);
+                    if (AmeliorationUtil.UseKernelDriver) ExtractArchive(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ProcessInformer.7z"), AppDomain.CurrentDomain.BaseDirectory);
                     try
                     {
                         File.Delete(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "CLI-Resources.7z"));
+                        File.Delete(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ProcessInformer.7z"));
                     } catch (Exception e)
                     {
                     }

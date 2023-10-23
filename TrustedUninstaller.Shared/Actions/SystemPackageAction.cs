@@ -14,6 +14,7 @@ namespace TrustedUninstaller.Shared.Actions
     // Integrate ame-assassin later
     internal class SystemPackageAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         public enum Architecture
         {
             amd64 = 0,
@@ -77,11 +78,13 @@ namespace TrustedUninstaller.Shared.Actions
                 }
             }
 
+            string kernelDriverArg = AmeliorationUtil.UseKernelDriver ? " -UseKernelDriver" : "";
+
             var psi = new ProcessStartInfo()
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                Arguments = $@"-SystemPackage ""{Name}"" -Arch {Arch.ToString()} -Language ""{Language}""" + excludeArgs + excludeDependsArgs,
+                Arguments = $@"-SystemPackage ""{Name}"" -Arch {Arch.ToString()} -Language ""{Language}""" + excludeArgs + excludeDependsArgs + kernelDriverArg,
                 FileName = Directory.GetCurrentDirectory() + "\\ame-assassin\\ame-assassin.exe",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true

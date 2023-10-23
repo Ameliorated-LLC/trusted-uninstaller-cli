@@ -16,6 +16,7 @@ namespace TrustedUninstaller.Shared.Actions
     }
     internal class LineInFileAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(Alias = "path")]
         public string RawPath { get; set; }
 

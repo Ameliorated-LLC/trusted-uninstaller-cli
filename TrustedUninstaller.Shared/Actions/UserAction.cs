@@ -10,6 +10,7 @@ namespace TrustedUninstaller.Shared.Actions
 {
     public class UserAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "name")]
         public string Username { get; set; } = "";
         [YamlMember(typeof(bool), Alias = "admin")]

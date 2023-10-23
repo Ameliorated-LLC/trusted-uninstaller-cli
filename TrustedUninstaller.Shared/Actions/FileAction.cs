@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Configuration.Install;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -9,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.ServiceProcess;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using TrustedUninstaller.Shared.Exceptions;
@@ -19,6 +21,7 @@ namespace TrustedUninstaller.Shared.Actions
 {
     public class FileAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "path")]
         public string RawPath { get; set; }
         
@@ -81,13 +84,14 @@ namespace TrustedUninstaller.Shared.Actions
         {
             if (!TrustedInstaller)
             {
-                try {await Task.Run(() => File.Delete(file));} catch {}
+                try { File.Delete(file);} catch (Exception e) { }
                     
                 if (File.Exists(file))
                 {
                     try
                     {
-                        EzUnlockFileW(file);
+                        var result = EzUnlockFileW(file);
+                        Testing.WriteLine($"ExUnlock on ({file}) result: " + result); 
                     }
                     catch (Exception e)
                     {
@@ -95,20 +99,21 @@ namespace TrustedUninstaller.Shared.Actions
                             $"FileAction Error", file);
                     }
                     
-                    try {await Task.Run(() => File.Delete(file));} catch {}
-                    
+                    try {await Task.Run(() => File.Delete(file));} catch (Exception e) {Testing.WriteLine(e, "DeleteFile > File.Delete(File)");}
+
                     CmdAction delAction = new CmdAction()
                     {
                         Command = $"del /q /f \"{file}\""
                     };
-                    await delAction.RunTask();
+                    delAction.RunTaskOnMainThread();
                 }
             }
             else if (File.Exists("NSudoLC.exe"))
             {
                 try
                 {
-                    EzUnlockFileW(file);
+                    var result = EzUnlockFileW(file);
+                    Testing.WriteLine($"ExUnlock on ({file}) result: " + result); 
                 }
                 catch (Exception e)
                 {
@@ -123,7 +128,7 @@ namespace TrustedUninstaller.Shared.Actions
                     CreateWindow = false
                 };
 
-                await tiDelAction.RunTask();
+                tiDelAction.RunTaskOnMainThread();
                 if (tiDelAction.Output != null)
                 {
                     if (log) ErrorLogger.WriteToErrorLog(tiDelAction.Output, Environment.StackTrace,
@@ -149,7 +154,7 @@ namespace TrustedUninstaller.Shared.Actions
                     {
                         Command = $"rmdir /Q /S \"{dir}\""
                     };
-                    await deleteDirCmd.RunTask();
+                    deleteDirCmd.RunTaskOnMainThread();
                         
                     if (deleteDirCmd.StandardError != null)
                     {
@@ -171,7 +176,7 @@ namespace TrustedUninstaller.Shared.Actions
                     CreateWindow = false
                 };
                 
-                await tiDelAction.RunTask();
+                tiDelAction.RunTaskOnMainThread();
                 
                 if (tiDelAction.Output != null)
                 {
@@ -216,15 +221,28 @@ namespace TrustedUninstaller.Shared.Actions
                             var cmdAction = new CmdAction();
                             Console.WriteLine($"Removing driver service {driverService}...");
 
+                            // TODO: Replace with win32
+                            try
+                            {
+                                ServiceInstaller ServiceInstallerObj = new ServiceInstaller();
+                                ServiceInstallerObj.Context = new InstallContext();
+                                ServiceInstallerObj.ServiceName = driverService; 
+                                ServiceInstallerObj.Uninstall(null);
+                            }
+                            catch (Exception e)
+                            {
+                                ErrorLogger.WriteToErrorLog("Service uninstall failed: " + e.Message, e.StackTrace, "FileAction Warning", RawPath);
+                            }
+                                
                             cmdAction.Command = Environment.Is64BitOperatingSystem ?
                                 $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction stop" :
                                 $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction stop";
-                            await cmdAction.RunTask();
+                            if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
 
                             cmdAction.Command = Environment.Is64BitOperatingSystem ?
                                 $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction delete" :
                                 $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction delete";
-                            await cmdAction.RunTask();
+                            if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
                         }
                         catch (Exception servException)
                         {
@@ -270,16 +288,19 @@ namespace TrustedUninstaller.Shared.Actions
                     {
                         try
                         {
-                            using var search = new ManagementObjectSearcher($"select * from Win32_Service where ProcessId = '{svchost.Id}'");
-
-                            foreach (ManagementObject queryObj in search.Get())
+                            foreach (var serviceName in Win32.ServiceEx.GetServicesFromProcessId(svchost.Id))
                             {
-                                var serviceName = (string)queryObj["Name"]; // Access service name  
-                                
-                                var serv = ServiceController.GetServices().FirstOrDefault(x => x.ServiceName.Equals(serviceName));
-
-                                if (serv == null) svcCount++;
-                                else svcCount += serv.DependentServices.Length + 1;
+                                svcCount++;
+                                try
+                                {
+                                    var serviceController = ServiceController.GetServices().FirstOrDefault(x => x.ServiceName.Equals(serviceName));
+                                    if (serviceController != null)
+                                        svcCount += serviceController.DependentServices.Length;
+                                }
+                                catch (Exception e)
+                                {
+                                    Console.WriteLine($"\r\nError: Could not get amount of dependent services for {serviceName}.\r\nException: " + e.Message);
+                                }
                             }
                         } catch (Exception e)
                         {
@@ -328,7 +349,15 @@ namespace TrustedUninstaller.Shared.Actions
                                 continue;
                             }
 
-                            await taskKillAction.RunTask();
+                            try
+                            {
+                                await taskKillAction.RunTask();
+                            }
+                            catch (Exception e)
+                            {
+                                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
+                                    $"FileAction Error: Could not kill process {taskKillAction.ProcessName}.");
+                            }
                         }
 
                         // This gives any obstinant processes some time to unlock the file on their own.
@@ -352,6 +381,11 @@ namespace TrustedUninstaller.Shared.Actions
                     if (delay >= 800)
                         ErrorLogger.WriteToErrorLog($"Could not kill locking processes for file '{file}'. Process termination loop exceeded max cycles (8).",
                             Environment.StackTrace, "FileAction Error");
+                    
+                    if (Path.GetExtension(file).Equals(".exe", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await new TaskKillAction() { ProcessName = Path.GetFileNameWithoutExtension(file) }.RunTask();
+                    }
 
                     await DeleteFile(file, true);
 
@@ -419,7 +453,7 @@ namespace TrustedUninstaller.Shared.Actions
                     };
                     try
                     {
-                        await permAction.RunTask();
+                        permAction.RunTaskOnMainThread();
                     }
                     catch (Exception e)
                     {
@@ -466,7 +500,7 @@ namespace TrustedUninstaller.Shared.Actions
                     }
                 }
             }
-            else if (isFile)
+            if (isFile)
             {
                 try
                 {
@@ -486,7 +520,7 @@ namespace TrustedUninstaller.Shared.Actions
                         };
                         try
                         {
-                            await permAction.RunTask();
+                            permAction.RunTaskOnMainThread();
                         }
                         catch (Exception e)
                         {
@@ -504,15 +538,30 @@ namespace TrustedUninstaller.Shared.Actions
                                 var cmdAction = new CmdAction();
                                 Console.WriteLine($"Removing driver service {driverService}...");
 
+                                // TODO: Replace with win32
+                                try
+                                {
+                                    ServiceInstaller ServiceInstallerObj = new ServiceInstaller();
+                                    ServiceInstallerObj.Context = new InstallContext();
+                                    ServiceInstallerObj.ServiceName = driverService; 
+                                    ServiceInstallerObj.Uninstall(null);
+                                }
+                                catch (Exception e)
+                                {
+                                    ErrorLogger.WriteToErrorLog("Service uninstall failed: " + e.Message, e.StackTrace, "FileAction Warning", RawPath);
+                                }
+                                
+                                WinUtil.CheckKph();
+                                
                                 cmdAction.Command = Environment.Is64BitOperatingSystem ?
                                     $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction stop" :
                                     $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction stop";
-                                await cmdAction.RunTask();
+                                if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
 
                                 cmdAction.Command = Environment.Is64BitOperatingSystem ?
                                     $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction delete" :
                                     $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction delete";
-                                await cmdAction.RunTask();
+                                if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
                             }
                             catch (Exception servException)
                             {
@@ -558,16 +607,19 @@ namespace TrustedUninstaller.Shared.Actions
                         {
                             try
                             {
-                                using var search = new ManagementObjectSearcher($"select * from Win32_Service where ProcessId = '{svchost.Id}'");
-
-                                foreach (ManagementObject queryObj in search.Get())
+                                foreach (var serviceName in Win32.ServiceEx.GetServicesFromProcessId(svchost.Id))
                                 {
-                                    var serviceName = (string)queryObj["Name"]; // Access service name  
-                                
-                                    var serv = ServiceController.GetServices().FirstOrDefault(x => x.ServiceName.Equals(serviceName));
-
-                                    if (serv == null) svcCount++;
-                                    else svcCount += serv.DependentServices.Length + 1;
+                                    svcCount++;
+                                    try
+                                    {
+                                        var serviceController = ServiceController.GetServices().FirstOrDefault(x => x.ServiceName.Equals(serviceName));
+                                        if (serviceController != null)
+                                            svcCount += serviceController.DependentServices.Length;
+                                    }
+                                    catch (Exception e)
+                                    {
+                                        Console.WriteLine($"\r\nError: Could not get amount of dependent services for {serviceName}.\r\nException: " + e.Message);
+                                    }
                                 }
                             } catch (Exception e)
                             {
@@ -645,6 +697,11 @@ namespace TrustedUninstaller.Shared.Actions
                             ErrorLogger.WriteToErrorLog($"Could not kill locking processes for file '{realPath}'. Process termination loop exceeded max cycles (8).",
                                 Environment.StackTrace, "FileAction Error");
 
+                        if (Path.GetExtension(realPath).Equals(".exe", StringComparison.OrdinalIgnoreCase))
+                        {
+                            await new TaskKillAction() { ProcessName = Path.GetFileNameWithoutExtension(realPath) }.RunTask();
+                        }
+                        
                         await DeleteFile(realPath, true);
                     }
                 }

@@ -24,6 +24,15 @@ namespace TrustedUninstaller.Shared.Tasks
 
         public int Priority { get; set; } = 1;
         public UninstallTaskPrivilege Privilege { get; set; } = UninstallTaskPrivilege.Admin;
+
+        [YamlMember(typeof(string), Alias = "option")]
+        public string Option { get; set; } = null;
+        [YamlMember(typeof(string[]), Alias = "options")]
+        public string[] Options { get; set; } = null;
+        [YamlMember(typeof(string[]), Alias = "builds")]
+        public string[] Builds { get; set; } = null;
+        [YamlMember(typeof(string), Alias = "cpuArch")]
+        public string Arch { get; set; } = null;
         
         public List<string> Features { get; set; } = new List<string>();
 

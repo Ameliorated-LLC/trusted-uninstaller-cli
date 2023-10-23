@@ -9,12 +9,27 @@ namespace TrustedUninstaller.Shared
 {
     public class Globals
     {
-        public const string CurrentVersion = "0.7.2";
-        public const double CurrentVersionNumber = 0.72;
-#if DEBUG
-        public static readonly int WinVer = 19045;
-#else
+        public const string CurrentVersion = "0.7.3";
+        public const double CurrentVersionNumber = 0.73;
+
         public static readonly int WinVer = Int32.Parse(Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion").GetValue("CurrentBuildNumber").ToString());
-#endif        
+
+        private static int _winUpdateVer = -1;
+        public static int WinUpdateVer
+        {
+            get
+            {
+                if (_winUpdateVer != -1)
+                    return _winUpdateVer;
+
+                try
+                {
+                    _winUpdateVer = (int)Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion").GetValue("UBR");
+                }
+                catch { _winUpdateVer = 0; }
+
+                return _winUpdateVer;
+            }
+        } 
     }
 }

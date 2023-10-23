@@ -13,9 +13,22 @@ namespace TrustedUninstaller.Shared.Actions
 {
     class TaskKillAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [DllImport("kernel32.dll", SetLastError=true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         static extern bool TerminateProcess(IntPtr hProcess, uint uExitCode);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr OpenProcess(ProcessAccessFlags dwDesiredAccess,
+            bool bInheritHandle, int dwProcessId);
+        
+        public enum ProcessAccessFlags : uint
+        {
+            QueryLimitedInformation = 0x1000
+        }
+        
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool CloseHandle(IntPtr hObject);
         
         [YamlMember(typeof(string), Alias = "name")]
         public string? ProcessName { get; set; }
@@ -73,18 +86,38 @@ namespace TrustedUninstaller.Shared.Actions
             return processToTerminate.Any() ? UninstallTaskStatus.ToDo : UninstallTaskStatus.Completed;
         }
 
-        private IEnumerable<Process> GetProcess()
+        private List<Process> GetProcess()
         {
-            if (ProcessName == null) return new List<Process>();
+            if (ProcessID.HasValue)
+            {
+                var list = new List<Process>();
+                try
+                {
+                    var process = Process.GetProcessById(ProcessID.Value);
+                    if (ProcessName == null || process.ProcessName.Equals(ProcessName, StringComparison.OrdinalIgnoreCase))
+                        list.Add(process);
+                    else
+                        return list;
+                }
+                catch (Exception e)
+                {
+                    return list;
+                } 
+            }
             
-            if (ProcessName.EndsWith("*") && ProcessName.StartsWith("*")) return Process.GetProcesses()
-                .Where(process => process.ProcessName.IndexOf(ProcessName.Trim('*'), StringComparison.CurrentCultureIgnoreCase) >= 0);
+            if (ProcessName == null)
+            {
+                return new List<Process>();
+            }
+            
+            if (ProcessName.EndsWith("*") && ProcessName.StartsWith("*")) return Process.GetProcesses().ToList()
+                .Where(process => process.ProcessName.IndexOf(ProcessName.Trim('*'), StringComparison.CurrentCultureIgnoreCase) >= 0).ToList();
             if (ProcessName.EndsWith("*")) return Process.GetProcesses()
-                .Where(process => process.ProcessName.StartsWith(ProcessName.TrimEnd('*'), StringComparison.CurrentCultureIgnoreCase));
+                .Where(process => process.ProcessName.StartsWith(ProcessName.TrimEnd('*'), StringComparison.CurrentCultureIgnoreCase)).ToList();
             if (ProcessName.StartsWith("*")) return Process.GetProcesses()
-                .Where(process => process.ProcessName.EndsWith(ProcessName.TrimStart('*'), StringComparison.CurrentCultureIgnoreCase));
+                .Where(process => process.ProcessName.EndsWith(ProcessName.TrimStart('*'), StringComparison.CurrentCultureIgnoreCase)).ToList();
 
-            return Process.GetProcessesByName(ProcessName);
+            return Process.GetProcessesByName(ProcessName).ToList();
         } 
         [DllImport("kernel32.dll", SetLastError=true)]
         static extern bool IsProcessCritical(IntPtr hProcess, ref bool Critical);
@@ -116,85 +149,76 @@ namespace TrustedUninstaller.Shared.Actions
             if (ProcessName != null)
             {
                 //If the service is svchost, we stop the service instead of killing it.
-                if (ProcessName.Contains("svchost"))
+                if (ProcessName.Equals("svchost", StringComparison.OrdinalIgnoreCase))
                 {
-                    // bool serviceFound = false;
                     try
                     {
-                        using var search = new ManagementObjectSearcher($"select * from Win32_Service where ProcessId = '{ProcessID}'");
-
-                        foreach (ManagementObject queryObj in search.Get())
+                        if (ProcessID.HasValue)
                         {
-                            var serviceName = (string)queryObj["Name"]; // Access service name  
-                            
-                            var stopServ = new ServiceAction()
+                            foreach (var serviceName in Win32.ServiceEx.GetServicesFromProcessId(ProcessID.Value))
                             {
-                                ServiceName = serviceName,
-                                Operation = ServiceOperation.Stop
+                                try
+                                {
+                                    var stopServ = new ServiceAction()
+                                    {
+                                        ServiceName = serviceName,
+                                        Operation = ServiceOperation.Stop
+                                    };
+                                    await stopServ.RunTask();
+                                }
+                                catch (Exception e)
+                                {
+                                    Console.WriteLine($"Could not kill service " + serviceName + ": " + e.Message);
+                                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Could not kill service " + serviceName + ": " + e.Message);
+                                }
+                            }
+                        }
+                        else
+                        {
+                            foreach (var process in GetProcess())
+                            {
+                                foreach (var serviceName in Win32.ServiceEx.GetServicesFromProcessId(process.Id))
+                                {
+                                    try
+                                    {
+                                        var stopServ = new ServiceAction()
+                                        {
+                                            ServiceName = serviceName,
+                                            Operation = ServiceOperation.Stop
 
-                            };
-                            await stopServ.RunTask();
+                                        };
+                                        await stopServ.RunTask();
+                                    }
+                                    catch (Exception e)
+                                    {
+                                        Console.WriteLine($"Could not kill service " + serviceName + ": " + e.Message);
+                                        ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Could not kill service " + serviceName + ": " + e.Message);
+                                    }
+                                }
+                            }
                         }
                     }
                     catch (NullReferenceException e)
                     {
-                        Console.WriteLine($"A service with PID: {ProcessID} could not be found.");
-                        ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, $"Could not find service with PID {ProcessID}.");
+                        Console.WriteLine($"A service with PID: {ProcessID.Value} could not be found.");
+                        ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, $"Could not find service with PID {ProcessID.Value}.");
                     }
 
-
-/*                    foreach (var serv in servicesToDelete)
+                    int i;
+                    for (i = 0; i <= 6 && GetProcess().Any(); i++)
                     {
-                        //The ID can only be associated with one of the services, there's no need to loop through
-                        //them all if we already found the service.
-                        if (serviceFound)
-                        {
-                            break;
-                        }
-
-                        try
-                        {
-                            using var search = new ManagementObjectSearcher($"select ProcessId from Win32_Service where Name = '{serv}'").Get();
-                            var servID = (uint)search.OfType<ManagementObject>().FirstOrDefault()["ProcessID"];
-
-                            if (servID == ProcessID)
-                            {
-                                serviceFound = true;
-
-
-
-                            }
-                            search.Dispose();
-                        }
-                        catch (Exception e)
-                        {
-                            var search = new ManagementObjectSearcher($"select Name from Win32_Service where ProcessID = '{ProcessID}'").Get();
-                            var servName = search.OfType<ManagementObject>().FirstOrDefault()["Name"];
-                            Console.WriteLine($"Could not find {servName} but PID {ProcessID} still exists.");
-                            ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, $"Exception Type: {e.GetType()}");
-                            return false;
-                        }
-                    }*/
-                    //None of the services listed, we shouldn't kill svchost.
-/*                    if (!serviceFound)
+                        await Task.Delay(100 * i);
+                    }
+                    if (i < 6)
                     {
-                        var search = new ManagementObjectSearcher($"select Name from Win32_Service where ProcessID = '{ProcessID}'").Get();
-                        var servName = search.OfType<ManagementObject>().FirstOrDefault()["Name"];
-                        Console.WriteLine($"A critical system process \"{servName}\" with PID {ProcessID} caused the Wizard to fail.");
-                        await WinUtil.UninstallDriver();
-                        Environment.Exit(-1);
-                        return false;
-                    }*/
-
-                    await Task.Delay(100);
-
-                    InProgress = false;
-                    return true;
+                        InProgress = false;
+                        return true;
+                    }
                 }
 
                 if (PathContains != null && !ProcessID.HasValue)
                 {
-                    var processes = GetProcess().ToList();
+                    var processes = GetProcess();
                     if (processes.Count > 0) Console.WriteLine("Processes:");
 
                     foreach (var process in processes.Where(x => x.MainModule.FileName.Contains(PathContains)))
@@ -203,58 +227,74 @@ namespace TrustedUninstaller.Shared.Actions
 
                         if (!RegexNotCritical.Any(x => Regex.Match(process.ProcessName, x, RegexOptions.IgnoreCase).Success)) {
                             bool isCritical = false;
-                            IsProcessCritical(process.Handle, ref isCritical);
+                            IntPtr hprocess = OpenProcess(ProcessAccessFlags.QueryLimitedInformation, false, process.Id);
+                            IsProcessCritical(hprocess, ref isCritical);
+                            CloseHandle(hprocess);
                             if (isCritical)
                             {
                                 Console.WriteLine($"{process.ProcessName} is a critical process, skipping...");
                                 continue;
                             }
                         }
-                        
+
                         cmdAction.Command = Environment.Is64BitOperatingSystem ?
                             $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.Id} -caction terminate" :
                             $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.Id} -caction terminate";
-                        await cmdAction.RunTask();
+                        
+                        if (AmeliorationUtil.UseKernelDriver) 
+                            cmdAction.RunTaskOnMainThread();
+                        else
+                            TerminateProcess(process.Handle, 1);
                         
                         int i = 0;
-                        while (i <= 15 && GetProcess().Any(x => x.Id == process.Id && x.ProcessName == process.ProcessName))
+                        while (i <= 5 && GetProcess().Any(x => x.Id == process.Id && x.ProcessName == process.ProcessName))
                         {
                             await Task.Delay(300);
+                            if (AmeliorationUtil.UseKernelDriver)
+                                cmdAction.RunTaskOnMainThread();
+                            else 
+                                TerminateProcess(process.Handle, 1);
                             i++;
                         }
-                        if (i >= 15) ErrorLogger.WriteToErrorLog($"Task kill timeout exceeded.", Environment.StackTrace, "TaskKillAction Error");
+                        try {
+                            if (!TerminateProcess(process.Handle, 1)) 
+                                ErrorLogger.WriteToErrorLog("TerminateProcess failed with error code: " + Marshal.GetLastWin32Error(), Environment.StackTrace, "TaskKill Error", ProcessName);
+                        }
+                        catch (Exception e)
+                        {
+                            ErrorLogger.WriteToErrorLog("Could not open process handle.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                        }
+                        
+                        if (i >= 5) ErrorLogger.WriteToErrorLog($"Task kill timeout exceeded.", Environment.StackTrace, "TaskKillAction Error");
                     }
                     InProgress = false;
                     return true;
                 }
             }
-            
             if (ProcessID.HasValue)
             {
+                var process = Process.GetProcessById(ProcessID.Value);
                 if (ProcessName != null && ProcessName.Equals("explorer", StringComparison.OrdinalIgnoreCase))
                 {
-                    try
+                    try {
+                        if (!TerminateProcess(process.Handle, 1))
+                            ErrorLogger.WriteToErrorLog("TerminateProcess failed with error code: " + Marshal.GetLastWin32Error(), Environment.StackTrace, "TaskKill Error", ProcessName);
+                    }
+                    catch (Exception e)
                     {
-                        var process = Process.GetProcessById(ProcessID.Value);
-                        TerminateProcess(process.Handle, 1);
-                    } catch (Exception)
-                    {
-                        cmdAction.Command = Environment.Is64BitOperatingSystem ?
-                            $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {ProcessID} -caction terminate" :
-                            $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {ProcessID} -caction terminate";
-                        await cmdAction.RunTask();
+                        ErrorLogger.WriteToErrorLog("Could not open process handle.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
                     }
                 }
                 else
                 {
-                    var process = Process.GetProcessById(ProcessID.Value);
-
                     if (!RegexNotCritical.Any(x => Regex.Match(process.ProcessName, x, RegexOptions.IgnoreCase).Success))
                     {
                         bool isCritical = false;
                         try
                         {
-                            IsProcessCritical(process.Handle, ref isCritical);
+                            IntPtr hprocess = OpenProcess(ProcessAccessFlags.QueryLimitedInformation, false, process.Id);
+                            IsProcessCritical(hprocess, ref isCritical);
+                            CloseHandle(hprocess);
                         }
                         catch (InvalidOperationException e)
                         {
@@ -267,59 +307,81 @@ namespace TrustedUninstaller.Shared.Actions
                             return false;
                         }
                     }
+                    try {
+                        if (!TerminateProcess(process.Handle, 1))
+                            ErrorLogger.WriteToErrorLog("TerminateProcess failed with error code: " + Marshal.GetLastWin32Error(), Environment.StackTrace, "TaskKill Error", ProcessName);
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorLogger.WriteToErrorLog("Could not open process handle.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                    }
+                    
                     cmdAction.Command = Environment.Is64BitOperatingSystem ?
-                        $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {ProcessID} -caction terminate" :
-                        $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {ProcessID} -caction terminate";
-                    await cmdAction.RunTask();
+                        $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {ProcessID.Value} -caction terminate" :
+                        $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {ProcessID.Value} -caction terminate";
+                    if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
                 }
 
                 await Task.Delay(100);
             }
             else
             {
-                var processes = GetProcess().ToList();
+                var processes = GetProcess();
                 if (processes.Count > 0) Console.WriteLine("Processes:");
 
                 foreach (var process in processes)
                 {
                     Console.WriteLine(process.ProcessName + " - " + process.Id);
+
+                    if (!RegexNotCritical.Any(x => Regex.Match(process.ProcessName, x, RegexOptions.IgnoreCase).Success))
+                    {
+                        bool isCritical = false;
+                        try
+                        {
+                            IntPtr hprocess = OpenProcess(ProcessAccessFlags.QueryLimitedInformation, false, process.Id);
+                            IsProcessCritical(hprocess, ref isCritical);
+                            CloseHandle(hprocess);
+                        }
+                        catch (InvalidOperationException e)
+                        {
+                            ErrorLogger.WriteToErrorLog("Could not check if process is critical.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                            continue;
+                        }
+                        if (isCritical)
+                        {
+                            Console.WriteLine($"{process.ProcessName} is a critical process, skipping...");
+                            continue;
+                        }
+                    }
+                    try
+                    {
+                        if (!TerminateProcess(process.Handle, 1))
+                            ErrorLogger.WriteToErrorLog("TerminateProcess failed with error code: " + Marshal.GetLastWin32Error(), Environment.StackTrace, "TaskKill Error", ProcessName);
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorLogger.WriteToErrorLog("Could not open process handle.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                    }
+                    
+                    if (process.ProcessName == "explorer") continue;
                     
                     cmdAction.Command = Environment.Is64BitOperatingSystem ?
-                        $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.ProcessName}.exe -caction terminate" :
-                        $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.ProcessName}.exe -caction terminate";
-                    if (process.ProcessName == "explorer") TerminateProcess(process.Handle, 1);
-                    else
-                    {
-                        if (!RegexNotCritical.Any(x => Regex.Match(process.ProcessName, x, RegexOptions.IgnoreCase).Success))
-                        {
-                            bool isCritical = false;
-                            try
-                            {
-                                IsProcessCritical(process.Handle, ref isCritical);
-                            }
-                            catch (InvalidOperationException e)
-                            {
-                                ErrorLogger.WriteToErrorLog("Could not check if process is critical.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
-                                continue;
-                            }
-                            if (isCritical)
-                            {
-                                Console.WriteLine($"{process.ProcessName} is a critical process, skipping...");
-                                continue;
-                            }
-                        }
-
-                        await cmdAction.RunTask();
-                    }
+                        $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.Id} -caction terminate" :
+                        $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.Id} -caction terminate";
+                    if (AmeliorationUtil.UseKernelDriver && process.ProcessName != "explorer") cmdAction.RunTaskOnMainThread();
 
                     int i = 0;
 
-                    while (i <= 15 && GetProcess().Any(x => x.Id == process.Id && x.ProcessName == process.ProcessName))
+                    while (i <= 5 && GetProcess().Any(x => x.Id == process.Id && x.ProcessName == process.ProcessName))
                     {
+                        if (AmeliorationUtil.UseKernelDriver)
+                            cmdAction.RunTaskOnMainThread();
+                        else
+                            TerminateProcess(process.Handle, 1);
                         await Task.Delay(300);
                         i++;
                     }
-                    if (i >= 15) ErrorLogger.WriteToErrorLog($"Task kill timeout exceeded.", Environment.StackTrace, "TaskKillAction Error");
+                    if (i >= 5) ErrorLogger.WriteToErrorLog($"Task kill timeout exceeded.", Environment.StackTrace, "TaskKillAction Error");
                 }
             }
             

@@ -16,6 +16,8 @@ namespace TrustedUninstaller.Shared.Actions
     // Integrate ame-assassin later
     internal class AppxAction : TaskAction, ITaskAction
     {
+        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
+        
         public enum AppxOperation
         {
             Remove = 0,
@@ -38,6 +40,9 @@ namespace TrustedUninstaller.Shared.Actions
         public AppxOperation Operation { get; set; } = AppxOperation.Remove;
         [YamlMember(typeof(bool), Alias = "verboseOutput")]
         public bool Verbose { get; set; } = false;
+        
+        [YamlMember(typeof(bool), Alias = "unregister")]
+        public bool Unregister { get; set; } = false;
         
         [YamlMember(typeof(string), Alias = "weight")]
         public int ProgressWeight { get; set; } = 30;
@@ -69,14 +74,18 @@ namespace TrustedUninstaller.Shared.Actions
             InProgress = true;
 
             Console.WriteLine($"Removing APPX {Type.ToString().ToLower()} '{Name}'...");
+            
+            WinUtil.CheckKph();
 
             string verboseArg = Verbose ? " -Verbose" : "";
+            string unregisterArg = Unregister ? " -Verbose" : "";
+            string kernelDriverArg = AmeliorationUtil.UseKernelDriver ? " -UseKernelDriver" : "";
             
             var psi = new ProcessStartInfo()
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
-                Arguments = $@"-{Type.ToString()} ""{Name}""" + verboseArg,
+                Arguments = $@"-{Type.ToString()} ""{Name}""" + verboseArg + unregisterArg + kernelDriverArg,
                 FileName = Directory.GetCurrentDirectory() + "\\ame-assassin\\ame-assassin.exe",
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
@@ -98,7 +107,7 @@ namespace TrustedUninstaller.Shared.Actions
             bool exited = proc.WaitForExit(30000);
                     
             // WaitForExit alone seems to not be entirely reliable
-            while (!exited && ExeRunning(proc))
+            while (!exited && ExeRunning("ame-assassin", proc.Id))
             {
                 exited = proc.WaitForExit(30000);
             }
@@ -121,11 +130,11 @@ namespace TrustedUninstaller.Shared.Actions
             if (!write.Equals("Complete!")) Console.WriteLine(write);
         }
         
-        private static bool ExeRunning(Process process)
+        private static bool ExeRunning(string name, int id)
         {
             try
             {
-                return Process.GetProcessesByName(process.ProcessName).Any(x => x.Id == process.Id);
+                return Process.GetProcessesByName(name).Any(x => x.Id == id);
             }
             catch (Exception)
             {

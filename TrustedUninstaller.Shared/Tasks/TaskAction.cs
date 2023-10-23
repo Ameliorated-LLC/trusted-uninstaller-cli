@@ -6,8 +6,16 @@ namespace TrustedUninstaller.Shared.Tasks
     {
         [YamlMember(typeof(bool), Alias = "ignoreErrors")]
         public bool IgnoreErrors { get; set; } = false;
+        
         [YamlMember(typeof(string), Alias = "option")]
         public string Option { get; set; } = null;
+        
+        [YamlMember(typeof(string[]), Alias = "options")]
+        public string[] Options { get; set; } = null;
+        
+        [YamlMember(typeof(string[]), Alias = "builds")]
+        public string[] Builds { get; set; } = null;
+        
         [YamlMember(typeof(string), Alias = "cpuArch")]
         public string Arch { get; set; } = null;
     }
