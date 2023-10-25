@@ -17,7 +17,7 @@ using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    internal enum ServiceOperation
+    public enum ServiceOperation
     {
         Stop,
         Continue,
@@ -26,7 +26,7 @@ namespace TrustedUninstaller.Shared.Actions
         Delete,
         Change
     }
-    internal class ServiceAction : TaskAction, ITaskAction
+    public class ServiceAction : TaskAction, ITaskAction
     {
         public void RunTaskOnMainThread() { throw new NotImplementedException(); }
         [YamlMember(typeof(ServiceOperation), Alias = "operation")]
@@ -175,6 +175,9 @@ namespace TrustedUninstaller.Shared.Actions
             {
                 Console.WriteLine($"No services found matching '{ServiceName}'.");
                 //ErrorLogger.WriteToErrorLog($"The service matching '{ServiceName}' does not exist.", Environment.StackTrace, "ServiceAction Error");
+                if (Operation == ServiceOperation.Start)
+                    throw new ArgumentException("Service " + ServiceName + " not found.");
+                
                 return false;
             }
 
@@ -182,63 +185,72 @@ namespace TrustedUninstaller.Shared.Actions
 
             var cmdAction = new CmdAction();
 
-            if (Operation == ServiceOperation.Delete || Operation == ServiceOperation.Stop)
+            if ((Operation == ServiceOperation.Delete && DeleteStop) || Operation == ServiceOperation.Stop)
             {
                 if (RegexNoKill.Any(regex => Regex.Match(ServiceName, regex, RegexOptions.IgnoreCase).Success))
                 {
                     Console.WriteLine($"Skipping {ServiceName}...");
                     return false;
                 }
-                
-                foreach (ServiceController dependentService in service.DependentServices)
-                {
-                    Console.WriteLine($"Killing dependent service {dependentService.ServiceName}...");
-                    
-                    try
-                    {
-                        dependentService.Stop();
-                    }
-                    catch (Exception e)
-                    {
-                        ErrorLogger.WriteToErrorLog("Service stop failed: " + e.Message, e.StackTrace, "ServiceAction Warning", ServiceName);
-                    }
 
-                    cmdAction.Command = Environment.Is64BitOperatingSystem ?
-                        $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {dependentService.ServiceName} -caction stop" : 
-                        $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {dependentService.ServiceName} -caction stop";
-                    if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
-                    
-                    Console.WriteLine("Waiting for the service to stop...");
-                    int delay = 100;
-                    while (dependentService.Status != ServiceControllerStatus.Stopped && delay <= 1000)
+                try
+                {
+                    foreach (ServiceController dependentService in service.DependentServices.Where(x => x.Status != ServiceControllerStatus.Stopped))
                     {
-                        dependentService.Refresh();
-                        //Wait for the service to stop
-                        Task.Delay(delay).Wait();
-                        delay += 100;
-                    }
-                    if (delay >= 1000)
-                    {
-                        Console.WriteLine("\r\nService stop timeout exceeded.");
-                    }
-                    try
-                    {
-                        var killServ = new TaskKillAction()
+                        Console.WriteLine($"Killing dependent service {dependentService.ServiceName}...");
+
+                        if (dependentService.Status != ServiceControllerStatus.StopPending && dependentService.Status != ServiceControllerStatus.Stopped)
                         {
-                            ProcessID = Win32.ServiceEx.GetServiceProcessId(dependentService.ServiceName)
-                        };
-                        await killServ.RunTask();
-                    }
-                    catch (Exception e)
-                    {
-                        ErrorLogger.WriteToErrorLog($"Could not kill dependent service {dependentService.ServiceName}.",
-                            e.StackTrace, "ServiceAction Error");
+                            try
+                            {
+                                dependentService.Stop();
+                            }
+                            catch (Exception e)
+                            {
+                                dependentService.Refresh();
+                                if (dependentService.Status != ServiceControllerStatus.Stopped && dependentService.Status != ServiceControllerStatus.StopPending)
+                                    ErrorLogger.WriteToErrorLog("Dependent service stop failed: " + e.Message, e.StackTrace, "ServiceAction Warning", dependentService.ServiceName);
+                            }
+
+                            cmdAction.Command = Environment.Is64BitOperatingSystem ?
+                                $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {dependentService.ServiceName} -caction stop" : 
+                                $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {dependentService.ServiceName} -caction stop";
+                            if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
+                        }
+
+                        Console.WriteLine("Waiting for the dependent service to stop...");
+                        try
+                        {
+                            dependentService.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromMilliseconds(5000));
+                        }
+                        catch (Exception e)
+                        {
+                            dependentService.Refresh();
+                            if (service.Status != ServiceControllerStatus.Stopped)
+                                ErrorLogger.WriteToErrorLog("Dependent service stop timeout exceeded.", e.StackTrace, "ServiceAction Warning", ServiceName);
+                        }
+                        
+                        try
+                        {
+                            var killServ = new TaskKillAction()
+                            {
+                                ProcessID = Win32.ServiceEx.GetServiceProcessId(dependentService.ServiceName)
+                            };
+                            await killServ.RunTask();
+                        }
+                        catch (Exception e)
+                        {
+                            dependentService.Refresh();
+                            if (dependentService.Status != ServiceControllerStatus.Stopped)
+                                ErrorLogger.WriteToErrorLog($"Could not kill dependent service {dependentService.ServiceName}.",
+                                    e.StackTrace, "ServiceAction Error", ServiceName);
+                        }
                     }
                 }
-
-                if (service.ServiceName == "SgrmAgent" && ((Operation == ServiceOperation.Delete && DeleteStop) || Operation == ServiceOperation.Stop))
+                catch (Exception e)
                 {
-                    await new TaskKillAction() { ProcessName = "SgrmBroker" }.RunTask();
+                    ErrorLogger.WriteToErrorLog($"Error killing dependent services: " + e.Message,
+                        e.StackTrace, "ServiceAction Error", ServiceName);
                 }
             }
 
@@ -253,41 +265,43 @@ namespace TrustedUninstaller.Shared.Actions
                     }
                     catch (Exception e)
                     {
-                        ErrorLogger.WriteToErrorLog("Service stop failed: " + e.Message, e.StackTrace, "ServiceAction Warning", ServiceName);
+                        service.Refresh();
+                        if (service.Status != ServiceControllerStatus.Stopped && service.Status != ServiceControllerStatus.StopPending)
+                            ErrorLogger.WriteToErrorLog("Service stop failed: " + e.Message, e.StackTrace, "ServiceAction Warning", ServiceName);
                     }
 
                     cmdAction.Command = Environment.Is64BitOperatingSystem ?
                         $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction stop" : 
                         $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction stop";
                     if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
-                }
-
-                Console.WriteLine("Waiting for the service to stop...");
-                int delay = 100;
-                while (DeleteStop && service.Status != ServiceControllerStatus.Stopped && delay <= 1500)
-                {
-                    service.Refresh();
-                    //Wait for the service to stop
-                    await Task.Delay(delay);
-                    delay += 100;
-                }
-                if (delay >= 1000)
-                {
-                    Console.WriteLine("\r\nService stop timeout exceeded.");
-                }
-                try
-                {
-                    var killServ = new TaskKillAction()
+                    
+                    Console.WriteLine("Waiting for the service to stop...");
+                    try
                     {
-                        ProcessID = Win32.ServiceEx.GetServiceProcessId(service.ServiceName)
-                    };
-                    await killServ.RunTask();
+                        service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromMilliseconds(5000));
+                    }
+                    catch (Exception e)
+                    {
+                        service.Refresh();
+                        if (service.Status != ServiceControllerStatus.Stopped)
+                            ErrorLogger.WriteToErrorLog("Service stop timeout exceeded.", e.StackTrace, "ServiceAction Warning", ServiceName);
+                    }
+                    try
+                    {
+                        var killServ = new TaskKillAction()
+                        {
+                            ProcessID = Win32.ServiceEx.GetServiceProcessId(service.ServiceName)
+                        };
+                        await killServ.RunTask();
+                    }
+                    catch (Exception e)
+                    {
+                        service.Refresh();
+                        if (service.Status != ServiceControllerStatus.Stopped)
+                            ErrorLogger.WriteToErrorLog($"Could not kill service {service.ServiceName}.", e.StackTrace, "ServiceAction Error");
+                    }
                 }
-                catch (Exception e)
-                {
-                    ErrorLogger.WriteToErrorLog($"Could not kill service {service.ServiceName}.", e.StackTrace, "ServiceAction Error");
-                }
-
+                
                 if (RegistryDelete)
                 {
                     var action = new RegistryKeyAction()
@@ -316,8 +330,35 @@ namespace TrustedUninstaller.Shared.Actions
                     if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
                 }
 
-            }
-            else
+            } else if (Operation == ServiceOperation.Start)
+            {
+                try
+                {
+                    service.Start();
+                }
+                catch (Exception e)
+                {
+                    service.Refresh();
+                    if (service.Status != ServiceControllerStatus.Running)
+                        ErrorLogger.WriteToErrorLog("Service start failed: " + e.Message, e.StackTrace, "ServiceAction Warning", ServiceName);
+                }
+
+                cmdAction.Command = Environment.Is64BitOperatingSystem ?
+                    $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction start" : 
+                    $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction start";
+                if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
+                
+                try
+                {
+                    service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromMilliseconds(5000));
+                }
+                catch (Exception e)
+                {
+                    service.Refresh();
+                    if (service.Status != ServiceControllerStatus.Running)
+                        ErrorLogger.WriteToErrorLog("Service start timeout exceeded.", e.StackTrace, "ServiceAction Warning", ServiceName);
+                }
+            } else if (Operation == ServiceOperation.Stop)
             {
                 try
                 {
@@ -325,13 +366,99 @@ namespace TrustedUninstaller.Shared.Actions
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog("Service stop failed: " + e.Message, e.StackTrace, "ServiceAction Warning", ServiceName);
+                    service.Refresh();
+                    if (service.Status != ServiceControllerStatus.Stopped && service.Status != ServiceControllerStatus.StopPending)
+                        ErrorLogger.WriteToErrorLog("Service stop failed: " + e.Message, e.StackTrace, "ServiceAction Warning", ServiceName);
                 }
 
                 cmdAction.Command = Environment.Is64BitOperatingSystem ?
-                    $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction {Operation.ToString().ToLower()}" : 
-                    $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction {Operation.ToString().ToLower()}";
+                    $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction stop" :
+                    $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction stop";
                 if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
+
+                Console.WriteLine("Waiting for the service to stop...");
+                try
+                {
+                    service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromMilliseconds(5000));
+                }
+                catch (Exception e)
+                {
+                    service.Refresh();
+                    if (service.Status != ServiceControllerStatus.Stopped)
+                        ErrorLogger.WriteToErrorLog("Service stop timeout exceeded.", e.StackTrace, "ServiceAction Warning", ServiceName);
+                }
+                try
+                {
+                    var killServ = new TaskKillAction()
+                    {
+                        ProcessID = Win32.ServiceEx.GetServiceProcessId(service.ServiceName)
+                    };
+                    await killServ.RunTask();
+                }
+                catch (Exception e)
+                {
+                    service.Refresh();
+                    if (service.Status != ServiceControllerStatus.Stopped)
+                        ErrorLogger.WriteToErrorLog($"Could not kill dependent service {service.ServiceName}.",
+                            e.StackTrace, "ServiceAction Error");
+                }
+            } else if (Operation == ServiceOperation.Pause)
+            {
+                try
+                {
+                    service.Pause();
+                }
+                catch (Exception e)
+                {
+                    service.Refresh();
+                    if (service.Status != ServiceControllerStatus.Paused)
+                        ErrorLogger.WriteToErrorLog("Service pause failed: " + e.Message, e.StackTrace, "ServiceAction Warning", ServiceName);
+                }
+
+                cmdAction.Command = Environment.Is64BitOperatingSystem ?
+                    $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction pause" : 
+                    $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction pause";
+                if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
+                
+                try
+                {
+                    service.WaitForStatus(ServiceControllerStatus.Paused, TimeSpan.FromMilliseconds(5000));
+                }
+                catch (Exception e)
+                {
+                    service.Refresh();
+                    if (service.Status != ServiceControllerStatus.Paused)
+                        ErrorLogger.WriteToErrorLog("Service pause timeout exceeded.", e.StackTrace, "ServiceAction Warning", ServiceName);
+                }
+            }
+            else if (Operation == ServiceOperation.Continue)
+            {
+                try
+                {
+                    service.Pause();
+                }
+                catch (Exception e)
+                {
+                    service.Refresh();
+                    if (service.Status != ServiceControllerStatus.Running)
+                        ErrorLogger.WriteToErrorLog("Service continue failed: " + e.Message, e.StackTrace, "ServiceAction Warning", ServiceName);
+                }
+
+                cmdAction.Command = Environment.Is64BitOperatingSystem ?
+                    $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction continue" : 
+                    $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {service.ServiceName} -caction continue";
+                if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
+                
+                try
+                {
+                    service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromMilliseconds(5000));
+                }
+                catch (Exception e)
+                {
+                    service.Refresh();
+                    if (service.Status != ServiceControllerStatus.Running)
+                        ErrorLogger.WriteToErrorLog("Service continue timeout exceeded.", e.StackTrace, "ServiceAction Warning", ServiceName);
+                }
             }
 
             service?.Dispose();

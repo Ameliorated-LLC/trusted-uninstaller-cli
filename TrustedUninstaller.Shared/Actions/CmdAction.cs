@@ -18,7 +18,10 @@ namespace TrustedUninstaller.Shared.Actions
             if (InProgress) throw new TaskInProgressException("Another Cmd action was called while one was in progress.");
             InProgress = true;
             
-            Console.WriteLine($"Running cmd command '{Command}'...");
+            var privilegeText = RunAs == Privilege.CurrentUser ? " as the current user" : RunAs == Privilege.CurrentUserElevated ? " as the current user elevated" : RunAs == Privilege.System ?
+                " as the system account" : "";
+            
+            Console.WriteLine($"Running cmd command '{Command}'{privilegeText}...");
 
             ExitCode = null;
             
@@ -149,7 +152,7 @@ namespace TrustedUninstaller.Shared.Actions
                 ErrorLogger.WriteToErrorLog("Error fetching process exit code. (1)", null, "CmdAction Error", Command);
             }
             
-            if (exitCode != 0)
+            if (exitCode != 0 && !Command.Contains("ProcessHacker\\x64\\ProcessHacker.exe"))
             {
                 StandardError = error.ToString();
                 Console.WriteLine($"cmd instance exited with error code: {exitCode}");
@@ -189,7 +192,7 @@ namespace TrustedUninstaller.Shared.Actions
             {
                 WindowStyle = ProcessWindowStyle.Normal,
                 FileName = "cmd.exe",
-                Arguments = "/C " + $"\"{Environment.ExpandEnvironmentVariables(this.Command)}\"",
+                Arguments = "/C " + $"{this.Command}",
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 RedirectStandardOutput = true,

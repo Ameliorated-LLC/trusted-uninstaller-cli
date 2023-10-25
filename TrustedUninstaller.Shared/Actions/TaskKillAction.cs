@@ -221,11 +221,22 @@ namespace TrustedUninstaller.Shared.Actions
                     var processes = GetProcess();
                     if (processes.Count > 0) Console.WriteLine("Processes:");
 
-                    foreach (var process in processes.Where(x => x.MainModule.FileName.Contains(PathContains)))
+                    foreach (var process in processes.Where(x =>
+                             {
+                                 try
+                                 {
+                                     return x.MainModule.FileName.Contains(PathContains);
+                                 }
+                                 catch (Exception e)
+                                 {
+                                     return false;
+                                 }
+                             }))
                     {
                         Console.WriteLine(process.ProcessName + " - " + process.Id);
 
-                        if (!RegexNotCritical.Any(x => Regex.Match(process.ProcessName, x, RegexOptions.IgnoreCase).Success)) {
+                        if (!RegexNotCritical.Any(x => Regex.Match(process.ProcessName, x, RegexOptions.IgnoreCase).Success))
+                        {
                             bool isCritical = false;
                             IntPtr hprocess = OpenProcess(ProcessAccessFlags.QueryLimitedInformation, false, process.Id);
                             IsProcessCritical(hprocess, ref isCritical);
@@ -236,36 +247,54 @@ namespace TrustedUninstaller.Shared.Actions
                                 continue;
                             }
                         }
-
-                        cmdAction.Command = Environment.Is64BitOperatingSystem ?
-                            $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.Id} -caction terminate" :
-                            $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.Id} -caction terminate";
-                        
-                        if (AmeliorationUtil.UseKernelDriver) 
-                            cmdAction.RunTaskOnMainThread();
-                        else
-                            TerminateProcess(process.Handle, 1);
-                        
-                        int i = 0;
-                        while (i <= 5 && GetProcess().Any(x => x.Id == process.Id && x.ProcessName == process.ProcessName))
+                        try
                         {
-                            await Task.Delay(300);
-                            if (AmeliorationUtil.UseKernelDriver)
-                                cmdAction.RunTaskOnMainThread();
-                            else 
-                                TerminateProcess(process.Handle, 1);
-                            i++;
-                        }
-                        try {
-                            if (!TerminateProcess(process.Handle, 1)) 
+                            if (!TerminateProcess(process.Handle, 1))
                                 ErrorLogger.WriteToErrorLog("TerminateProcess failed with error code: " + Marshal.GetLastWin32Error(), Environment.StackTrace, "TaskKill Error", ProcessName);
                         }
                         catch (Exception e)
                         {
-                            ErrorLogger.WriteToErrorLog("Could not open process handle.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                            ErrorLogger.WriteToErrorLog("Could not open process handle: " + e.Message, e.StackTrace, "TaskKillAction Error", process.ProcessName);
                         }
-                        
-                        if (i >= 5) ErrorLogger.WriteToErrorLog($"Task kill timeout exceeded.", Environment.StackTrace, "TaskKillAction Error");
+                        try
+                        {
+                            process.WaitForExit(1000);
+                        }
+                        catch (Exception e)
+                        {
+                            ErrorLogger.WriteToErrorLog("Error waiting for process exit: " + e.Message, e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                        }
+
+                        if (process.ProcessName == "explorer") continue;
+
+                        cmdAction.Command = Environment.Is64BitOperatingSystem ?
+                            $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.Id} -caction terminate" :
+                            $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {process.Id} -caction terminate";
+                        if (AmeliorationUtil.UseKernelDriver && process.ProcessName != "explorer") cmdAction.RunTaskOnMainThread();
+
+                        int i = 0;
+
+                        while (i <= 3 && GetProcess().Any(x => x.Id == process.Id && x.ProcessName == process.ProcessName))
+                        {
+                            try
+                            {
+                                try
+                                {
+                                    if (AmeliorationUtil.UseKernelDriver)
+                                        cmdAction.RunTaskOnMainThread();
+                                    else
+                                        TerminateProcess(process.Handle, 1);
+                                }
+                                catch (Exception e) { }
+
+                                process.WaitForExit(500);
+                            }
+                            catch (Exception e) { }
+                            await Task.Delay(100);
+                            i++;
+                        }
+                        if (i >= 3) ErrorLogger.WriteToErrorLog($"Task kill timeout exceeded.", Environment.StackTrace, "TaskKillAction Error");
+
                     }
                     InProgress = false;
                     return true;
@@ -279,10 +308,19 @@ namespace TrustedUninstaller.Shared.Actions
                     try {
                         if (!TerminateProcess(process.Handle, 1))
                             ErrorLogger.WriteToErrorLog("TerminateProcess failed with error code: " + Marshal.GetLastWin32Error(), Environment.StackTrace, "TaskKill Error", ProcessName);
+
+                        try
+                        {
+                            process.WaitForExit(1000);
+                        }
+                        catch (Exception e)
+                        {
+                            ErrorLogger.WriteToErrorLog("Error waiting for process exit: " + e.Message, e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                        }
                     }
                     catch (Exception e)
                     {
-                        ErrorLogger.WriteToErrorLog("Could not open process handle.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                        ErrorLogger.WriteToErrorLog("Could not open process handle: " + e.Message, e.StackTrace, "TaskKillAction Error", process.ProcessName);
                     }
                 }
                 else
@@ -307,13 +345,22 @@ namespace TrustedUninstaller.Shared.Actions
                             return false;
                         }
                     }
-                    try {
+                    try
+                    {
                         if (!TerminateProcess(process.Handle, 1))
                             ErrorLogger.WriteToErrorLog("TerminateProcess failed with error code: " + Marshal.GetLastWin32Error(), Environment.StackTrace, "TaskKill Error", ProcessName);
                     }
                     catch (Exception e)
                     {
-                        ErrorLogger.WriteToErrorLog("Could not open process handle.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                        ErrorLogger.WriteToErrorLog("Could not open process handle: " + e.Message, e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                    }
+                    try
+                    {
+                        process.WaitForExit(1000);
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorLogger.WriteToErrorLog("Error waiting for process exit: " + e.Message, e.StackTrace, "TaskKillAction Error", process.ProcessName);
                     }
                     
                     cmdAction.Command = Environment.Is64BitOperatingSystem ?
@@ -321,8 +368,33 @@ namespace TrustedUninstaller.Shared.Actions
                         $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype process -cobject {ProcessID.Value} -caction terminate";
                     if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
                 }
+                
+                int i = 0;
+                
+                while (i <= 3 && GetProcess().Any(x => x.Id == process.Id && x.ProcessName == process.ProcessName))
+                {
+                    try
+                    {
+                        try
+                        {
+                            if (AmeliorationUtil.UseKernelDriver)
+                                cmdAction.RunTaskOnMainThread();
+                            else
+                                TerminateProcess(process.Handle, 1);
+                        }
+                        catch (Exception e)
+                        {
+                        }
 
-                await Task.Delay(100);
+                        process.WaitForExit(500);
+                    }
+                    catch (Exception e)
+                    {
+                    }
+                    await Task.Delay(100);
+                    i++;
+                }
+                if (i >= 3) ErrorLogger.WriteToErrorLog($"Task kill timeout exceeded.", Environment.StackTrace, "TaskKillAction Error");
             }
             else
             {
@@ -360,7 +432,15 @@ namespace TrustedUninstaller.Shared.Actions
                     }
                     catch (Exception e)
                     {
-                        ErrorLogger.WriteToErrorLog("Could not open process handle.", e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                        ErrorLogger.WriteToErrorLog("Could not open process handle: " + e.Message, e.StackTrace, "TaskKillAction Error", process.ProcessName);
+                    }
+                    try
+                    {
+                        process.WaitForExit(1000);
+                    }
+                    catch (Exception e)
+                    {
+                        ErrorLogger.WriteToErrorLog("Error waiting for process exit: " + e.Message, e.StackTrace, "TaskKillAction Error", process.ProcessName);
                     }
                     
                     if (process.ProcessName == "explorer") continue;
@@ -372,16 +452,30 @@ namespace TrustedUninstaller.Shared.Actions
 
                     int i = 0;
 
-                    while (i <= 5 && GetProcess().Any(x => x.Id == process.Id && x.ProcessName == process.ProcessName))
+                    while (i <= 3 && GetProcess().Any(x => x.Id == process.Id && x.ProcessName == process.ProcessName))
                     {
-                        if (AmeliorationUtil.UseKernelDriver)
-                            cmdAction.RunTaskOnMainThread();
-                        else
-                            TerminateProcess(process.Handle, 1);
-                        await Task.Delay(300);
+                        try
+                        {
+                            try
+                            {
+                                if (AmeliorationUtil.UseKernelDriver)
+                                    cmdAction.RunTaskOnMainThread();
+                                else
+                                    TerminateProcess(process.Handle, 1);
+                            }
+                            catch (Exception e)
+                            {
+                            }
+
+                            process.WaitForExit(500);
+                        }
+                        catch (Exception e)
+                        {
+                        }
+                        await Task.Delay(100);
                         i++;
                     }
-                    if (i >= 5) ErrorLogger.WriteToErrorLog($"Task kill timeout exceeded.", Environment.StackTrace, "TaskKillAction Error");
+                    if (i >= 3) ErrorLogger.WriteToErrorLog($"Task kill timeout exceeded.", Environment.StackTrace, "TaskKillAction Error");
                 }
             }
             

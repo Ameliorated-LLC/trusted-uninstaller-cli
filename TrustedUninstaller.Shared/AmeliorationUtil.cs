@@ -69,17 +69,6 @@ namespace TrustedUninstaller.Shared
 
                 var currentTask = Parser.Tasks[Parser.Tasks.Count - 1];
 
-                if (File.Exists("TasksAdded.txt"))
-                {
-                    var doneTasks = File.ReadAllText("TasksAdded.txt").Split(new[] { "\r\n" }, StringSplitOptions.None);
-
-                    if (doneTasks.Contains(currentTask.Title))
-                    {
-                        Parser.Tasks.Remove(currentTask);
-                        return true;
-                    }
-                }
-
                 if ((!IsApplicableOption(currentTask.Option, Playbook.Options) || !IsApplicableArch(currentTask.Arch)) ||
                     (currentTask.Builds != null && (
                         !currentTask.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
@@ -302,8 +291,6 @@ namespace TrustedUninstaller.Shared
                 Console.WriteLine("Task completed.");
                 
                 ProcessPrivilege.ResetTokens();
-                
-                File.AppendAllText("TasksAdded.txt", task.Title + Environment.NewLine);
             }
             catch (Exception e)
             {
@@ -354,11 +341,6 @@ namespace TrustedUninstaller.Shared
             //After the auto start up.
             Directory.SetCurrentDirectory(AppDomain.CurrentDomain.BaseDirectory);
 
-            if (File.Exists("TasksAdded.txt") && !WinUtil.IsTrustedInstaller())
-            {
-                File.Delete("TasksAdded.txt");
-            }
-
             if (Directory.Exists("Logs") && !WinUtil.IsTrustedInstaller())
             {
                 if (File.Exists("Logs\\AdminOutput.txt"))
@@ -369,11 +351,6 @@ namespace TrustedUninstaller.Shared
                 if (File.Exists("Logs\\TIOutput.txt"))
                 {
                     File.Delete("Logs\\TIOutput.txt");
-                }
-
-                if (File.Exists("Logs\\FileChecklist.txt"))
-                {
-                    File.Delete("Logs\\FileChecklist.txt");
                 }
             }
 
@@ -438,30 +415,6 @@ namespace TrustedUninstaller.Shared
             
             WinUtil.RegistryManager.UnhookUserHives();
 
-            //Check how many files were successfully and unsuccessfully deleted.
-            var deletedItemsCount = 0;
-            var failedDeletedItemsCount = 0;
-
-            if (File.Exists("Logs\\FileChecklist.txt"))
-            {
-                using (var reader = new StreamReader("Logs\\FileChecklist.txt"))
-                {
-                    var data = reader.ReadToEnd();
-                    var listData = data.Split(new [] { Environment.NewLine }, StringSplitOptions.None).ToList();
-                    deletedItemsCount = listData.FindAll(s => s == "Deleted: True").Count();
-                    failedDeletedItemsCount = listData.FindAll(s => s == "Deleted: False").Count();
-                }
-
-                using (var writer = new StreamWriter("Logs\\FileChecklist.txt", true))
-                {
-                    writer.WriteLine($"{deletedItemsCount} files were deleted successfully. " +
-                        $"{failedDeletedItemsCount} files couldn't be deleted.");
-                }
-            }
-
-            Console.WriteLine($"{deletedItemsCount} files were deleted successfully. " +
-                $"{failedDeletedItemsCount} files couldn't be deleted.");
-
             //Check if the kernel driver is installed.
             //service = ServiceController.GetDevices()
                 //.FirstOrDefault(s => s.DisplayName == "KProcessHacker2");
@@ -475,8 +428,6 @@ namespace TrustedUninstaller.Shared
                     KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2",
                 });
             }
-            
-            File.Delete("TasksAdded.txt");
             
             Console.WriteLine();
             Console.WriteLine("Playbook finished.");

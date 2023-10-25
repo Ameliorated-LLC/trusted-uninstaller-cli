@@ -25,8 +25,11 @@ namespace TrustedUninstaller.Shared.Actions
             if (RawPath != null) RawPath = Environment.ExpandEnvironmentVariables(RawPath);
             InProgress = true;
 
-            if (Arguments == null) Console.WriteLine($"Running '{Exe}'...");
-            else Console.WriteLine($"Running '{Exe}' with arguments '{Arguments}'...");
+            var privilegeText = RunAs == Privilege.CurrentUser ? " as the current user" : RunAs == Privilege.CurrentUserElevated ? " as the current user elevated" : RunAs == Privilege.System ?
+                " as the system account" : "";
+            
+            if (Arguments == null) Console.WriteLine($"Running '{Exe + privilegeText}'...");
+            else Console.WriteLine($"Running '{Exe}' with arguments '{Arguments + privilegeText}'...");
 
             WinUtil.CheckKph();
             
@@ -221,6 +224,8 @@ namespace TrustedUninstaller.Shared.Actions
                 exeProcess.CancelOutputRead();
             if (ShowError)
                 exeProcess.CancelErrorRead();
+            
+            exeProcess.Dispose();
         }
         private void RunAsPrivilegedProcess(string file)
         {
@@ -324,6 +329,8 @@ namespace TrustedUninstaller.Shared.Actions
                 exeProcess.CancelOutputRead();
             if (ShowError)
                 exeProcess.CancelErrorRead();
+            
+            exeProcess.Dispose();
         }
         
         private static bool ExeRunning(string name, int id)
@@ -340,40 +347,54 @@ namespace TrustedUninstaller.Shared.Actions
 
         private void PrivilegedProcOutputHandler(object sendingProcess, AugmentedProcess.DataReceivedEventArgs outLine)
         {
-            // Collect the sort command output. 
-            if (!String.IsNullOrEmpty(outLine.Data))
+            try
             {
-                var outputString = outLine.Data;
-
-                if (outputString.Contains("\\AME"))
+                // Collect the sort command output. 
+                if (!String.IsNullOrEmpty(outLine.Data))
                 {
-                    outputString = outputString.Substring(outputString.IndexOf('>') + 1);
+                    var outputString = outLine.Data;
+
+                    if (outputString.Contains("\\AME"))
+                    {
+                        outputString = outputString.Substring(outputString.IndexOf('>') + 1);
+                    }
+                    Console.WriteLine(outputString);
+                    Output += outputString + Environment.NewLine;
                 }
-                Console.WriteLine(outputString);
-                Output += outputString + Environment.NewLine;
+                else
+                {
+                    Console.WriteLine();
+                }
             }
-            else
+            catch (Exception e)
             {
-                Console.WriteLine();
+                ErrorLogger.WriteToErrorLog("Error processing process output", e.StackTrace, "RunAction Error", Exe);
             }
         }
         private void ProcOutputHandler(object sendingProcess, DataReceivedEventArgs outLine)
         {
-            // Collect the sort command output. 
-            if (!String.IsNullOrEmpty(outLine.Data))
+            try
             {
-                var outputString = outLine.Data;
-
-                if (outputString.Contains("\\AME"))
+                // Collect the sort command output. 
+                if (!String.IsNullOrEmpty(outLine.Data))
                 {
-                    outputString = outputString.Substring(outputString.IndexOf('>') + 1);
+                    var outputString = outLine.Data;
+
+                    if (outputString.Contains("\\AME"))
+                    {
+                        outputString = outputString.Substring(outputString.IndexOf('>') + 1);
+                    }
+                    Console.WriteLine(outputString);
+                    Output += outputString + Environment.NewLine;
                 }
-                Console.WriteLine(outputString);
-                Output += outputString + Environment.NewLine;
+                else
+                {
+                    Console.WriteLine();
+                }
             }
-            else
+            catch (Exception e)
             {
-                Console.WriteLine();
+                ErrorLogger.WriteToErrorLog("Error processing process output", e.StackTrace, "RunAction Error", Exe);
             }
         }
     }

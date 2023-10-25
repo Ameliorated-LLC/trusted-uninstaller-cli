@@ -388,12 +388,6 @@ namespace TrustedUninstaller.Shared.Actions
                     }
 
                     await DeleteFile(file, true);
-
-                    using (var writer = new StreamWriter("Logs\\FileChecklist.txt", true))
-                    {
-                        writer.WriteLine($"File Path: {file}\r\nDeleted: {!File.Exists(file)}\r\n" +
-                            $"======================");
-                    }
                 }
             }
             //Loop through any subdirectories
@@ -709,11 +703,6 @@ namespace TrustedUninstaller.Shared.Actions
                 {
                     ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
                         $"FileAction Error: Error while trying to delete {realPath}.");
-                }
-                using (var writer = new StreamWriter("Logs\\FileChecklist.txt", true))
-                {
-                    writer.WriteLine($"File Path: {realPath}\r\nDeleted: {!File.Exists(realPath)}\r\n" +
-                        $"======================");
                 }
             }
             else

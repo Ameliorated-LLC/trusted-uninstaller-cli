@@ -9,8 +9,8 @@ namespace TrustedUninstaller.Shared
 {
     public class Globals
     {
-        public const string CurrentVersion = "0.7.3";
-        public const double CurrentVersionNumber = 0.73;
+        public const string CurrentVersion = "0.7.4";
+        public const double CurrentVersionNumber = 0.74;
 
         public static readonly int WinVer = Int32.Parse(Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion").GetValue("CurrentBuildNumber").ToString());
 

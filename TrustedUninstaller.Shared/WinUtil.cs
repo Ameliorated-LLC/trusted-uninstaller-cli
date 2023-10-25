@@ -649,20 +649,27 @@ namespace TrustedUninstaller.Shared
             }
         }
 
-        public static async void CheckKph()
+        public static void CheckKph()
         {
-            if (!AmeliorationUtil.UseKernelDriver || new RegistryKeyAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Operation = RegistryKeyOperation.Add }.GetStatus() == UninstallTaskStatus.Completed)
-                return;
+            try
+            {
+                if (!AmeliorationUtil.UseKernelDriver || new RegistryKeyAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Operation = RegistryKeyOperation.Add }.GetStatus() == UninstallTaskStatus.Completed)
+                    return;
             
-            Console.WriteLine(Environment.NewLine + "Installing driver...");
-            var cmdAction = new CmdAction();
-            cmdAction.Command = Environment.Is64BitOperatingSystem
-                ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -installkph"
-                : $"ProcessHacker\\x86\\ProcessHacker.exe -s -installkph";
-            cmdAction.RunTaskOnMainThread();
+                Console.WriteLine(Environment.NewLine + "Installing driver...");
+                var cmdAction = new CmdAction();
+                cmdAction.Command = Environment.Is64BitOperatingSystem
+                    ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -installkph"
+                    : $"ProcessHacker\\x86\\ProcessHacker.exe -s -installkph";
+                cmdAction.RunTaskOnMainThread();
             
-            await AmeliorationUtil.SafeRunAction(new RegistryValueAction()
-                { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Value = "DeleteFlag", Type = RegistryValueType.REG_DWORD, Data = 1 });
+                AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+                    { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Value = "DeleteFlag", Type = RegistryValueType.REG_DWORD, Data = 1 }).Wait();
+            }
+            catch (Exception e)
+            {
+                ErrorLogger.WriteToErrorLog("Error checking kernel driver: " + e.Message, e.StackTrace, "Warning");
+            }
         }
 
         private const int GWL_STYLE = -16;
@@ -755,11 +762,12 @@ namespace TrustedUninstaller.Shared
                 string name;
 
                 if (path.Contains("Users\\Default\\")) name = classHive ? "AME_UserHive_Default_Classes" : "AME_UserHive_Default";
-                else name = classHive ? "AME_UserHive_" + (HivesLoaded + 1) + "_Classes" : "AME_UserHive_" + (HivesLoaded + 1);
+                else name = classHive ? "AME_UserHive_" + (HivesLoaded) + "_Classes" : "AME_UserHive_" + (HivesLoaded + 1);
 
                 IntPtr parentHandle = parentKey.Handle.DangerousGetHandle();
                 RegLoadKey(parentHandle, name, path);
-                HivesLoaded++;
+                if (!path.Contains("Users\\Default\\"))
+                    HivesLoaded++;
             }
             private static void AcquirePrivileges()
             {
@@ -782,7 +790,7 @@ namespace TrustedUninstaller.Shared
 
             private static bool HivesHooked;
             private static int HivesLoaded;
-            public static async void HookUserHives()
+            public static void HookUserHives()
             {
                 try
                 {
@@ -855,7 +863,7 @@ namespace TrustedUninstaller.Shared
                 }
             }
 
-            public static async void UnhookUserHives()
+            public static void UnhookUserHives()
             {
                 try
                 {

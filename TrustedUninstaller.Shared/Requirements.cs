@@ -8,6 +8,8 @@ using System.Management;
 using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Xml.Serialization;
@@ -15,6 +17,7 @@ using Microsoft.Win32;
 using TrustedUninstaller.Shared;
 using TrustedUninstaller.Shared.Actions;
 using TrustedUninstaller.Shared.Tasks;
+using WUApiLib;
 
 namespace TrustedUninstaller.Shared
 {
@@ -49,7 +52,7 @@ namespace TrustedUninstaller.Shared
             NoTweakware = 10,
         }
 
-        public static async Task<Requirement[]> MetRequirements(this Requirement[] requirements)
+        public static async Task<Requirement[]> MetRequirements(this Requirement[] requirements, bool checkNoPendingUpdate = false)
         {
             var requirementEnum = (Requirement[])Enum.GetValues(typeof(Requirement));
             if (requirements == null)
@@ -65,16 +68,26 @@ namespace TrustedUninstaller.Shared
 
             if (requirements.Contains(Requirement.NoAntivirus))
                 if (true) metRequirements.Add(Requirement.NoAntivirus);
-            
-            if (requirements.Contains(Requirement.NoPendingUpdates))
-                if (await new NoPendingUpdates().IsMet()) metRequirements.Add(Requirement.NoPendingUpdates);
 
+            // Handled upstream
             if (requirements.Contains(Requirement.Activation))
-                if (await new Activation().IsMet()) metRequirements.Add(Requirement.Activation);
+                if (true) metRequirements.Add(Requirement.Activation);
             
             if (requirements.Contains(Requirement.DefenderDisabled))
                 if (await new DefenderDisabled().IsMet()) metRequirements.Add(Requirement.DefenderDisabled);
             
+            if (requirements.Contains(Requirement.PluggedIn))
+                if (await new Battery().IsMet()) metRequirements.Add(Requirement.PluggedIn);
+            
+            if (requirements.Contains(Requirement.NoPendingUpdates))
+                if (!checkNoPendingUpdate || (new [] {
+                        Requirement.Internet,
+                        Requirement.NoInternet,
+                        Requirement.PluggedIn,
+                        Requirement.DefenderDisabled
+                    }.All(metRequirements.Contains) &&
+                    await new NoPendingUpdates().IsMet())) metRequirements.Add(Requirement.NoPendingUpdates);
+
             if (requirements.Contains(Requirement.DefenderToggled))
                 if (await new DefenderDisabled().IsMet()) metRequirements.Add(Requirement.DefenderToggled);
 
@@ -83,9 +96,6 @@ namespace TrustedUninstaller.Shared
 
             if (requirements.Contains(Requirement.AdministratorPasswordSet))
                 metRequirements.Add(Requirement.AdministratorPasswordSet);
-                        
-            if (requirements.Contains(Requirement.PluggedIn))
-                if (await new Battery().IsMet()) metRequirements.Add(Requirement.PluggedIn);
             
             return metRequirements.ToArray();
         }
@@ -375,15 +385,124 @@ namespace TrustedUninstaller.Shared
             }
         }
         
+        class SearchCompletedCallback : ISearchCompletedCallback
+        {
+            public void Invoke(ISearchJob searchJob, ISearchCompletedCallbackArgs callbackArgs)
+            {
+                this.CompleteTask();
+            }
+            
+            private TaskCompletionSource<bool> taskSource = new TaskCompletionSource<bool>();
+            protected void CompleteTask()
+            {
+                taskSource.SetResult(true);
+            }
+
+            public Task Task
+            {
+                get
+                {
+                    return taskSource.Task;
+                }
+            }
+        }
+
+        private static Process _pendingUpdateCheckProcess = null;
         public class NoPendingUpdates : RequirementBase, IRequirements
         {
             public async Task<bool> IsMet()
             {
-                //TODO: This
-                return true;
+                try
+                {
+                    if (_pendingUpdateCheckProcess != null && !_pendingUpdateCheckProcess.HasExited)
+                    {
+                        _pendingUpdateCheckProcess.Kill();
+                    }
+                }
+                catch (Exception e) { }
+
+                bool updatesFound = false;
+                try
+                {
+                    // Using WUApiLib can crash the entire application if
+                    // Windows Update is faulty. For that reason we use a
+                    // separate process. To replicate, use an ameliorated
+                    // system and copy wuapi.dll & wuaeng.dll to System32.
+
+                    _pendingUpdateCheckProcess = new Process();
+                    _pendingUpdateCheckProcess.StartInfo = new ProcessStartInfo
+                    {
+                        FileName = Assembly.GetEntryAssembly().Location,
+                        Arguments = "-CheckPendingUpdates",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        CreateNoWindow = true
+                    };
+
+                    _pendingUpdateCheckProcess.OutputDataReceived += delegate(object sender, DataReceivedEventArgs args)
+                    {
+                        if (!string.IsNullOrWhiteSpace(args.Data))
+                            bool.TryParse(args.Data, out updatesFound);
+                    };
+
+                    _pendingUpdateCheckProcess.Start();
+
+                    _pendingUpdateCheckProcess.BeginOutputReadLine();
+
+                    if (!_pendingUpdateCheckProcess.WaitForExit(55000))
+                    {
+                        _pendingUpdateCheckProcess.Kill();
+                        throw new TimeoutException();
+                    }
+
+                    _pendingUpdateCheckProcess.CancelOutputRead();
+                    _pendingUpdateCheckProcess.Dispose();
+                }
+                catch (Exception e) {  }
+
+                return !updatesFound;
             }
 
             public Task<bool> Meet() => throw new NotImplementedException();
+
+            public static bool Check()
+            {
+                bool result = false;
+                try
+                {
+                    var updateSession = new UpdateSession();
+                    var updateSearcher = updateSession.CreateUpdateSearcher();
+                    updateSearcher.Online = false; //set to true if you want to search online
+
+                    SearchCompletedCallback searchCompletedCallback = new SearchCompletedCallback();
+
+                    ISearchJob searchJob = updateSearcher.BeginSearch(
+                        "IsInstalled=0 And IsHidden=0 And Type='Software' And DeploymentAction=*",
+                        searchCompletedCallback, null);
+
+                    try
+                    {
+                        searchCompletedCallback.Task.Wait(50000);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        searchJob.RequestAbort();
+                    }
+
+                    ISearchResult searchResult = updateSearcher.EndSearch(searchJob);
+
+                    if (searchResult.Updates.Cast<IUpdate>().Any(x => x.IsDownloaded))
+                    {
+                        result = true;
+                    }
+                }
+                catch (Exception e)
+                {
+                    result = false;
+                }
+
+                return result;
+            }
         }
         
         public class NoAntivirus : RequirementBase, IRequirements

@@ -19,7 +19,10 @@ namespace TrustedUninstaller.Shared.Actions
             if (InProgress) throw new TaskInProgressException("Another Powershell action was called while one was in progress.");
             InProgress = true;
             
-            Console.WriteLine($"Running PowerShell command '{Command}'...");
+            var privilegeText = RunAs == Privilege.CurrentUser ? " as the current user" : RunAs == Privilege.CurrentUserElevated ? " as the current user elevated" : RunAs == Privilege.System ?
+                " as the system account" : "";
+            
+            Console.WriteLine($"Running PowerShel command '{Command}'{privilegeText}...");
             
             WinUtil.CheckKph();
 
@@ -153,7 +156,7 @@ namespace TrustedUninstaller.Shared.Actions
             if (exitCode != 0)
             {
                 Console.WriteLine($"PowerShell instance exited with error code: {exitCode}");
-                if (!String.IsNullOrEmpty(StandardError)) Console.WriteLine($"Error message: {StandardError}");
+                if (!String.IsNullOrWhiteSpace(StandardError)) Console.WriteLine($"Error message: {StandardError}");
 
                 ErrorLogger.WriteToErrorLog("PowerShell exited with a non-zero exit code: " + exitCode, null, "PowerShellAction Error", Command);
                 
@@ -161,7 +164,7 @@ namespace TrustedUninstaller.Shared.Actions
             }
             else
             {
-                if (!String.IsNullOrEmpty(StandardError)) Console.WriteLine($"Error output: {StandardError}");
+                if (!String.IsNullOrWhiteSpace(StandardError)) Console.WriteLine($"Error output: {StandardError}");
                 ExitCode = 0;
             }
             
@@ -242,7 +245,7 @@ namespace TrustedUninstaller.Shared.Actions
             if (process.ExitCode != 0)
             {
                 Console.WriteLine($"PowerShell instance exited with error code: {process.ExitCode}");
-                if (!String.IsNullOrEmpty(StandardError)) Console.WriteLine($"Error message: {StandardError}");
+                if (!String.IsNullOrWhiteSpace(StandardError)) Console.WriteLine($"Error message: {StandardError}");
 
                 ErrorLogger.WriteToErrorLog("PowerShell exited with a non-zero exit code: " + process.ExitCode, null, "PowerShellAction Error", Command);
                 
@@ -250,7 +253,7 @@ namespace TrustedUninstaller.Shared.Actions
             }
             else
             {
-                if (!String.IsNullOrEmpty(StandardError)) Console.WriteLine($"Error output: {StandardError}");
+                if (!String.IsNullOrWhiteSpace(StandardError)) Console.WriteLine($"Error output: {StandardError}");
                 ExitCode = 0;
             }
             

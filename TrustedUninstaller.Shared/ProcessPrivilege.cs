@@ -157,8 +157,7 @@ namespace TrustedUninstaller.Shared
             
             if (lsassToken.DangerousGetHandle() == IntPtr.Zero)
             {
-                
-                var processHandle = Process.GetProcessesByName("lsass").First().Handle;
+                var processHandle = Win32.Process.OpenProcess(Win32.Process.ProcessAccessFlags.QueryLimitedInformation, false, Process.GetProcessesByName("lsass").First().Id);
                 if (!Win32.Tokens.OpenProcessToken(processHandle,
                         Win32.Tokens.TokenAccessFlags.TOKEN_DUPLICATE |
                         Win32.Tokens.TokenAccessFlags.TOKEN_ASSIGN_PRIMARY |
@@ -383,7 +382,7 @@ namespace TrustedUninstaller.Shared
             
             try
             {
-                var processHandle = Process.GetProcessesByName("winlogon").First().Handle;
+                var processHandle = Win32.Process.OpenProcess(Win32.Process.ProcessAccessFlags.QueryLimitedInformation, false, Process.GetProcessesByName("winlogon").First().Id);
                 if (!Win32.Tokens.OpenProcessToken(processHandle,
                         Win32.Tokens.TokenAccessFlags.TOKEN_DUPLICATE | Win32.Tokens.TokenAccessFlags.TOKEN_ASSIGN_PRIMARY |
                         Win32.Tokens.TokenAccessFlags.TOKEN_QUERY | Win32.Tokens.TokenAccessFlags.TOKEN_IMPERSONATE,
