@@ -15,9 +15,10 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Interop;
+using Core;
+using Core.Actions;
+using Interprocess;
 using Microsoft.Win32;
-using TrustedUninstaller.Shared.Actions;
-using TrustedUninstaller.Shared.Tasks;
 
 namespace TrustedUninstaller.Shared
 {
@@ -236,34 +237,6 @@ namespace TrustedUninstaller.Shared
             return HasWindowsGroup(@"NT SERVICE\TrustedInstaller");
         }
 
-        public static bool RelaunchAsTrustedInstaller()
-        {
-            var controller = new ServiceController("TrustedInstaller");
-            if (controller.Status != ServiceControllerStatus.Running)
-            {
-                controller.Start();
-                controller.WaitForStatus(ServiceControllerStatus.Running);
-            }
-
-            var targetProcess = Process.GetProcessesByName("TrustedInstaller").FirstOrDefault();
-
-            if (targetProcess == null)
-            {
-                return false;
-            }
-
-            var currentProcess = Process.GetCurrentProcess();
-            var currentModule = currentProcess.MainModule;
-
-            if (currentModule == null)
-            {
-                return false;
-            }
-
-            var currentExecutable = currentModule.FileName;
-            return NativeProcess.StartProcess(currentExecutable, targetProcess.Id, AmeliorationUtil.Playbook.Path);
-        }
-
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern Boolean ChangeServiceConfig(
             IntPtr hService,
@@ -418,8 +391,7 @@ namespace TrustedUninstaller.Shared
             int res = RmStartSession(out uint handle, 0, key);
             if (res != 0)
             {
-                ErrorLogger.WriteToErrorLog("Could not begin restart session. Unable to determine file locker.",
-                    Environment.StackTrace, $"Error while attempting to get locking processes of file {path}");
+                Log.EnqueueSafe(LogType.Warning, "Could not begin restart session. Unable to determine file locker: " + res, null, ("Path", path));
                 throw new Exception("Could not begin restart session.  Unable to determine file locker.");
             }
 
@@ -563,7 +535,7 @@ namespace TrustedUninstaller.Shared
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while retrieving the AV list.");
+                Log.EnqueueExceptionSafe(LogType.Warning, e, "Error while retrieving the AV list.");
             }
 
             return avList;
@@ -632,18 +604,17 @@ namespace TrustedUninstaller.Shared
 
                 try
                 {
-                    Console.WriteLine(Environment.NewLine + "Installing driver...");
                     cmdAction.Command = Environment.Is64BitOperatingSystem
                         ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -installkph"
                         : $"ProcessHacker\\x86\\ProcessHacker.exe -s -installkph";
-                    cmdAction.RunTaskOnMainThread();
+                    cmdAction.RunTask();
 
-                    await AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+                    CoreActions.SafeRun(new RegistryValueAction()
                         { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Value = "DeleteFlag", Type = RegistryValueType.REG_DWORD, Data = 1 });
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "ProcessHacker ran into an error while installing its driver.");
+                    Log.EnqueueExceptionSafe(e);
                     throw;
                 }
             }
@@ -661,14 +632,14 @@ namespace TrustedUninstaller.Shared
                 cmdAction.Command = Environment.Is64BitOperatingSystem
                     ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -installkph"
                     : $"ProcessHacker\\x86\\ProcessHacker.exe -s -installkph";
-                cmdAction.RunTaskOnMainThread();
+                cmdAction.RunTask();
             
-                AmeliorationUtil.SafeRunAction(new RegistryValueAction()
-                    { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Value = "DeleteFlag", Type = RegistryValueType.REG_DWORD, Data = 1 }).Wait();
+                CoreActions.SafeRun(new RegistryValueAction()
+                    { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2", Value = "DeleteFlag", Type = RegistryValueType.REG_DWORD, Data = 1 });
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog("Error checking kernel driver: " + e.Message, e.StackTrace, "Warning");
+                Log.EnqueueExceptionSafe(LogType.Warning, e);
             }
         }
 
@@ -709,7 +680,7 @@ namespace TrustedUninstaller.Shared
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error while checking if running system is a VM.");
+                Log.EnqueueExceptionSafe(e);
                 return false;
             }
         }
@@ -727,21 +698,21 @@ namespace TrustedUninstaller.Shared
                 cmdAction.Command = Environment.Is64BitOperatingSystem
                     ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -uninstallkph"
                     : $"ProcessHacker\\x86\\ProcessHacker.exe -s -uninstallkph";
-                cmdAction.RunTaskOnMainThread();
+                cmdAction.RunTask();
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "ProcessHacker ran into an Error while uninstalling the driver.");
+                Log.EnqueueExceptionSafe(LogType.Warning, e);
                 throw;
             }
         }
         
         public class RegistryManager
         {
-            [DllImport("advapi32.dll", SetLastError = true)]
+            [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
             static extern int RegLoadKey(IntPtr hKey, string lpSubKey, string lpFile);
 
-            [DllImport("advapi32.dll", SetLastError = true)]
+            [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
             static extern int RegSaveKey(IntPtr hKey, string lpFile, uint securityAttrPtr = 0);
 
             [DllImport("advapi32.dll", SetLastError = true)]
@@ -766,7 +737,7 @@ namespace TrustedUninstaller.Shared
 
                 IntPtr parentHandle = parentKey.Handle.DangerousGetHandle();
                 RegLoadKey(parentHandle, name, path);
-                if (!path.Contains("Users\\Default\\"))
+                if (!path.Contains("Users\\Default\\") && !classHive)
                     HivesLoaded++;
             }
             private static void AcquirePrivileges()
@@ -790,6 +761,7 @@ namespace TrustedUninstaller.Shared
 
             private static bool HivesHooked;
             private static int HivesLoaded;
+            [InterprocessMethod(Level.Administrator)]
             public static void HookUserHives()
             {
                 try
@@ -820,8 +792,7 @@ namespace TrustedUninstaller.Shared
                     {
                         if (!File.Exists($"{userDir}\\NTUSER.DAT"))
                         {
-                            ErrorLogger.WriteToErrorLog($"NTUSER.DAT file not found in user folder '{userDir}'.",
-                                Environment.StackTrace, $"Error attempting to load user registry hive.");
+                            Log.EnqueueSafe(LogType.Warning, $"NTUSER.DAT file not found in user folder.", null, ("User Dir", userDir));
                             continue;
                         }
                         LoadFromFile($"{userDir}\\NTUSER.DAT");
@@ -840,15 +811,13 @@ namespace TrustedUninstaller.Shared
                             }
                             catch (Exception e)
                             {
-                                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                                    $"Failed to create default user class hive.", userDir);
+                                Log.EnqueueSafe(LogType.Warning, $"Failed to create default user class hive.", null, ("User Dir", userDir));
                             }
                         }
                     
                         if (!File.Exists($@"{userDir}\AppData\Local\Microsoft\Windows\UsrClass.dat"))
                         {
-                            ErrorLogger.WriteToErrorLog($@"UsrClass.dat file not found in user appdata folder '{userDir}\AppData\Local\Microsoft\Windows'.",
-                                Environment.StackTrace, $"Error attempting to load user classes registry hive.");
+                            Log.EnqueueSafe(LogType.Warning, $"UsrClass.dat file not found in user appdata folder.", null, ("Folder", $@"{userDir}\AppData\Local\Microsoft\Windows"));
                             continue;
                         }
                         LoadFromFile($@"{userDir}\AppData\Local\Microsoft\Windows\UsrClass.dat", true);
@@ -857,12 +826,12 @@ namespace TrustedUninstaller.Shared
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                        $"Critical error while attempting to mount user hives.");
+                    Log.EnqueueExceptionSafe(e, $"Critical error while attempting to unmount user hives.");
                     Console.WriteLine(":AME-ERROR: Failure while mounting user registry hives.");
                 }
             }
 
+            [InterprocessMethod(Level.Administrator)]
             public static void UnhookUserHives()
             {
                 try
@@ -881,8 +850,7 @@ namespace TrustedUninstaller.Shared
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                        $"Critical error while attempting to unmount user hives.");
+                    Log.EnqueueExceptionSafe(e, $"Critical error while attempting to unmount user hives.");
                     Console.WriteLine(":AME-ERROR: Failure while unmounting user registry hives.");
                 }
             }

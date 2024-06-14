@@ -16,12 +16,13 @@ using System.Windows;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Serialization;
+using Core;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class FileAction : TaskAction, ITaskAction
+    public class FileAction : Tasks.TaskAction, ITaskAction
     {
-        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
+        public void RunTaskOnMainThread(Output.OutputWriter output) { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "path")]
         public string RawPath { get; set; }
         
@@ -35,6 +36,8 @@ namespace TrustedUninstaller.Shared.Actions
         public bool TrustedInstaller { get; set; } = false;
 
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => true;
         private bool InProgress { get; set; }
         public void ResetProgress() => InProgress = false;
         
@@ -51,7 +54,7 @@ namespace TrustedUninstaller.Shared.Actions
             return Environment.ExpandEnvironmentVariables(path);
         }
 
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             if (InProgress) return UninstallTaskStatus.InProgress; var realPath = GetRealPath();
             
@@ -80,7 +83,7 @@ namespace TrustedUninstaller.Shared.Actions
         [DllImport("Unlocker.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Unicode)]
         private static extern bool EzUnlockFileW(string path);
         
-        private async Task DeleteFile(string file, bool log = false)
+        private async Task DeleteFile(string file, Output.OutputWriter output, bool log = false)
         {
             if (!TrustedInstaller)
             {
@@ -90,22 +93,23 @@ namespace TrustedUninstaller.Shared.Actions
                 {
                     try
                     {
-                        var result = EzUnlockFileW(file);
-                        Testing.WriteLine($"ExUnlock on ({file}) result: " + result); 
+                        EzUnlockFileW(file);
                     }
                     catch (Exception e)
                     {
-                        ErrorLogger.WriteToErrorLog($"Error while unlocking file: " + e.Message, e.StackTrace,
-                            $"FileAction Error", file);
+                        Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                     }
                     
-                    try {await Task.Run(() => File.Delete(file));} catch (Exception e) {Testing.WriteLine(e, "DeleteFile > File.Delete(File)");}
-
+                    try { await Task.Run(() => File.Delete(file)); }
+                    catch (Exception e)
+                    {
+                        //Testing.WriteLine(e, "DeleteFile > File.Delete(File)");
+                    }
                     CmdAction delAction = new CmdAction()
                     {
                         Command = $"del /q /f \"{file}\""
                     };
-                    delAction.RunTaskOnMainThread();
+                    delAction.RunTaskOnMainThread(output);
                 }
             }
             else if (File.Exists("NSudoLC.exe"))
@@ -113,12 +117,11 @@ namespace TrustedUninstaller.Shared.Actions
                 try
                 {
                     var result = EzUnlockFileW(file);
-                    Testing.WriteLine($"ExUnlock on ({file}) result: " + result); 
+                   //Testing.WriteLine($"ExUnlock on ({file}) result: " + result); 
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog($"Error while unlocking file: " + e.Message, e.StackTrace,
-                        $"FileAction Error", file);
+                    Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                 }                
                 RunAction tiDelAction = new RunAction()
                 {
@@ -128,20 +131,14 @@ namespace TrustedUninstaller.Shared.Actions
                     CreateWindow = false
                 };
 
-                tiDelAction.RunTaskOnMainThread();
-                if (tiDelAction.Output != null)
-                {
-                    if (log) ErrorLogger.WriteToErrorLog(tiDelAction.Output, Environment.StackTrace,
-                        $"FileAction Error", file);
-                }
+                tiDelAction.RunTaskOnMainThread(output);
             }
             else
             {
-                ErrorLogger.WriteToErrorLog($"NSudo was invoked with no supplied NSudo executable.", Environment.StackTrace,
-                    $"FileAction Error", file);
+                Log.WriteSafe(LogType.Warning, "NSudo was invoked with no supplied NSudo executable.", new SerializableTrace(), output.LogOptions);
             }
         }
-        private async Task RemoveDirectory(string dir, bool log = false)
+        private async Task RemoveDirectory(string dir, Output.OutputWriter output, bool log = false)
         {
             if (!TrustedInstaller)
             {
@@ -149,21 +146,12 @@ namespace TrustedUninstaller.Shared.Actions
                     
                 if (Directory.Exists(dir))
                 {
-                    Console.WriteLine("Directory still exists.. trying second method.");
+                    output.WriteLineSafe("Info", "Directory still exists.. trying second method.");
                     var deleteDirCmd = new CmdAction()
                     {
                         Command = $"rmdir /Q /S \"{dir}\""
                     };
-                    deleteDirCmd.RunTaskOnMainThread();
-                        
-                    if (deleteDirCmd.StandardError != null)
-                    {
-                        Console.WriteLine($"Error Output: {deleteDirCmd.StandardError}");
-                    }
-                    if (deleteDirCmd.StandardOutput != null)
-                    {
-                        Console.WriteLine($"Standard Output: {deleteDirCmd.StandardOutput}");
-                    }
+                    deleteDirCmd.RunTaskOnMainThread(output);
                 }
             }
             else if (File.Exists("NSudoLC.exe"))
@@ -176,21 +164,14 @@ namespace TrustedUninstaller.Shared.Actions
                     CreateWindow = false
                 };
                 
-                tiDelAction.RunTaskOnMainThread();
-                
-                if (tiDelAction.Output != null)
-                {
-                    if (log) ErrorLogger.WriteToErrorLog(tiDelAction.Output, Environment.StackTrace,
-                        $"FileAction Error", dir);
-                }
+                tiDelAction.RunTaskOnMainThread(output);
             }
             else
             {
-                ErrorLogger.WriteToErrorLog($"NSudo was invoked with no supplied NSudo executable.", Environment.StackTrace,
-                    $"FileAction Error", dir);
+                Log.WriteSafe(LogType.Warning, "NSudo was invoked with no supplied NSudo executable.", new SerializableTrace(), output.LogOptions);
             }
         }
-        private async Task DeleteItemsInDirectory(string dir, string filter = "*")
+        private async Task DeleteItemsInDirectory(string dir, Output.OutputWriter output, string filter = "*")
         {
             var realPath = GetRealPath(dir);
 
@@ -202,11 +183,11 @@ namespace TrustedUninstaller.Shared.Actions
             var lockedFilesList = new List<string> { "MpOAV.dll", "MsMpLics.dll", "EppManifest.dll", "MpAsDesc.dll", "MpClient.dll", "MsMpEng.exe" };
             foreach (var file in files)
             {
-                Console.WriteLine($"Deleting {file}...");
+                output.WriteLineSafe("Info", $"Deleting {file}...");
 
                 System.GC.Collect();
                 System.GC.WaitForPendingFinalizers();
-                await DeleteFile(file);
+                await DeleteFile(file, output);
 
                 if (File.Exists(file))
                 {
@@ -219,7 +200,7 @@ namespace TrustedUninstaller.Shared.Actions
                         {
                             //ServiceAction won't work here due to it not being able to detect driver services.
                             var cmdAction = new CmdAction();
-                            Console.WriteLine($"Removing driver service {driverService}...");
+                            output.WriteLineSafe("Info", $"Removing driver service {driverService}...");
 
                             // TODO: Replace with win32
                             try
@@ -231,23 +212,22 @@ namespace TrustedUninstaller.Shared.Actions
                             }
                             catch (Exception e)
                             {
-                                ErrorLogger.WriteToErrorLog("Service uninstall failed: " + e.Message, e.StackTrace, "FileAction Warning", RawPath);
+                                Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                             }
                                 
                             cmdAction.Command = Environment.Is64BitOperatingSystem ?
                                 $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction stop" :
                                 $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction stop";
-                            if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
+                            if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread(output);
 
                             cmdAction.Command = Environment.Is64BitOperatingSystem ?
                                 $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction delete" :
                                 $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction delete";
-                            if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
+                            if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread(output);
                         }
                         catch (Exception servException)
                         {
-                            ErrorLogger.WriteToErrorLog(servException.Message, servException.StackTrace,
-                                $"FileAction Error: Error while trying to delete driver service {driverService}.", file);
+                            Log.WriteExceptionSafe(LogType.Warning, servException, output.LogOptions);
                         }
                     }
                     if (lockedFilesList.Contains(Path.GetFileName(file)))
@@ -257,16 +237,16 @@ namespace TrustedUninstaller.Shared.Actions
                             ProcessName = "MsMpEng"
                         };
 
-                        await killAction.RunTask();
+                        await killAction.RunTask(output);
 
                         killAction.ProcessName = "NisSrv";
-                        await killAction.RunTask();
+                        await killAction.RunTask(output);
 
                         killAction.ProcessName = "SecurityHealthService";
-                        await killAction.RunTask();
+                        await killAction.RunTask(output);
 
                         killAction.ProcessName = "smartscreen";
-                        await killAction.RunTask();
+                        await killAction.RunTask(output);
 
                     }
 
@@ -277,8 +257,7 @@ namespace TrustedUninstaller.Shared.Actions
                     }
                     catch (Exception e)
                     {
-                        ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                            $"FileAction Error", file);
+                        Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                     }
 
                     var delay = 0;
@@ -299,25 +278,25 @@ namespace TrustedUninstaller.Shared.Actions
                                 }
                                 catch (Exception e)
                                 {
-                                    Console.WriteLine($"\r\nError: Could not get amount of dependent services for {serviceName}.\r\nException: " + e.Message);
+                                    output.WriteLineSafe("Info", $"\r\nError: Could not get amount of dependent services for {serviceName}.\r\nException: " + e.Message);
                                 }
                             }
                         } catch (Exception e)
                         {
-                            Console.WriteLine($"\r\nError: Could not get amount of services locking file.\r\nException: " + e.Message);
+                            output.WriteLineSafe("Info", $"\r\nError: Could not get amount of services locking file.\r\nException: " + e.Message);
                         }
                     }
                     
                     while (processes.Any() && delay <= 800)
                     {
-                        Console.WriteLine("Processes locking the file:");
+                        output.WriteLineSafe("Info", "Processes locking the file:");
                         foreach (var process in processes)
                         {
-                            Console.WriteLine(process.ProcessName);
+                            output.WriteLineSafe("Info", process.ProcessName);
                         }
                         if (svcCount > 10)
                         {
-                            Console.WriteLine("Amount of locking services exceeds 10, skipping...");
+                            output.WriteLineSafe("Info", "Amount of locking services exceeds 10, skipping...");
                             break;
                         }
 
@@ -327,19 +306,19 @@ namespace TrustedUninstaller.Shared.Actions
                             {
                                 if (process.ProcessName.Equals("TrustedUninstaller.CLI"))
                                 {
-                                    Console.WriteLine("Skipping TU.CLI...");
+                                    output.WriteLineSafe("Info", "Skipping TU.CLI...");
                                     continue;
                                 }
                                 if (Regex.Match(process.ProcessName, "ame.?wizard", RegexOptions.IgnoreCase).Success)
                                 {
-                                    Console.WriteLine("Skipping AME Wizard...");
+                                    output.WriteLineSafe("Info", "Skipping AME Wizard...");
                                     continue;
                                 }
 
                                 taskKillAction.ProcessName = process.ProcessName;
                                 taskKillAction.ProcessID = process.Id;
 
-                                Console.WriteLine($"Killing locking process {process.ProcessName} with PID {process.Id}...");
+                                output.WriteLineSafe("Info", $"Killing locking process {process.ProcessName} with PID {process.Id}...");
                             }
                             catch (InvalidOperationException)
                             {
@@ -351,12 +330,11 @@ namespace TrustedUninstaller.Shared.Actions
 
                             try
                             {
-                                await taskKillAction.RunTask();
+                                await taskKillAction.RunTask(output);
                             }
                             catch (Exception e)
                             {
-                                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                                    $"FileAction Error: Could not kill process {taskKillAction.ProcessName}.");
+                                Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                             }
                         }
 
@@ -372,48 +350,45 @@ namespace TrustedUninstaller.Shared.Actions
                         }
                         catch (Exception e)
                         {
-                            ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                                $"FileAction Error", file);
+                            Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                         }
                         
                         delay += 100;
                     }
                     if (delay >= 800)
-                        ErrorLogger.WriteToErrorLog($"Could not kill locking processes for file '{file}'. Process termination loop exceeded max cycles (8).",
-                            Environment.StackTrace, "FileAction Error");
+                        Log.WriteSafe(LogType.Warning, "Could not kill locking processes for file '{file}'. Process termination loop exceeded max cycles (8).", new SerializableTrace(), output.LogOptions);
                     
                     if (Path.GetExtension(file).Equals(".exe", StringComparison.OrdinalIgnoreCase))
                     {
-                        await new TaskKillAction() { ProcessName = Path.GetFileNameWithoutExtension(file) }.RunTask();
+                        await new TaskKillAction() { ProcessName = Path.GetFileNameWithoutExtension(file) }.RunTask(output);
                     }
 
-                    await DeleteFile(file, true);
+                    await DeleteFile(file, output, true);
                 }
             }
             //Loop through any subdirectories
             foreach (var directory in directories)
             {
                 //Deletes the content of the directory
-                await DeleteItemsInDirectory(directory);
+                await DeleteItemsInDirectory(directory, output);
 
                 System.GC.Collect();
                 System.GC.WaitForPendingFinalizers();
-                await RemoveDirectory(directory, true);
+                await RemoveDirectory(directory, output, true);
 
                 if (Directory.Exists(directory))
-                    ErrorLogger.WriteToErrorLog($"Could not remove directory '{directory}'.",
-                        Environment.StackTrace, $"FileAction Error");
+                    Log.WriteSafe(LogType.Warning, $"Could not remove directory '{directory}'.", new SerializableTrace(), output.LogOptions);
             }
         }
 
-        public async Task<bool> RunTask()
+        public async Task<bool> RunTask(Output.OutputWriter output)
         {
             if (InProgress) throw new TaskInProgressException("Another File action was called while one was in progress.");
             InProgress = true;
 
             var realPath = GetRealPath();
             
-            Console.WriteLine($"Removing file or directory '{realPath}'...");
+            output.WriteLineSafe("Info", $"Removing file or directory '{realPath}'...");
             
             if (realPath.Contains("*"))
             {
@@ -423,7 +398,7 @@ namespace TrustedUninstaller.Shared.Actions
                 if (parentPath.Contains("*")) throw new ArgumentException("Parent directories to a given file filter cannot contain wildcards.");
                 var filter = realPath.Substring(lastToken + 1);
 
-                await DeleteItemsInDirectory(parentPath, filter);
+                await DeleteItemsInDirectory(parentPath, output, filter);
                 
                 InProgress = false;
                 return true;
@@ -436,7 +411,7 @@ namespace TrustedUninstaller.Shared.Actions
             {
                 System.GC.Collect();
                 System.GC.WaitForPendingFinalizers();
-                await RemoveDirectory(realPath);
+                await RemoveDirectory(realPath, output);
 
                 if (Directory.Exists(realPath))
                 {
@@ -447,11 +422,11 @@ namespace TrustedUninstaller.Shared.Actions
                     };
                     try
                     {
-                        permAction.RunTaskOnMainThread();
+                        permAction.RunTaskOnMainThread(output);
                     }
                     catch (Exception e)
                     {
-                        ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "FileAction Error", realPath);
+                        Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                     }
 
                     try
@@ -463,34 +438,33 @@ namespace TrustedUninstaller.Shared.Actions
                                 ProcessName = "MsMpEng"
                             };
 
-                            await killAction.RunTask();
+                            await killAction.RunTask(output);
 
                             killAction.ProcessName = "NisSrv";
-                            await killAction.RunTask();
+                            await killAction.RunTask(output);
 
                             killAction.ProcessName = "SecurityHealthService";
-                            await killAction.RunTask();
+                            await killAction.RunTask(output);
 
                             killAction.ProcessName = "smartscreen";
-                            await killAction.RunTask();
+                            await killAction.RunTask(output);
                         }
                     }
                     catch (Exception e)
                     {
-                        ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                            $"FileAction Error", realPath);
+                        Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                     }
                     
-                    await RemoveDirectory(realPath, true);
+                    await RemoveDirectory(realPath, output, true);
 
                     if (Directory.Exists(realPath))
                     {
                         //Delete the files in the initial directory. DOES delete directories.
-                        await DeleteItemsInDirectory(realPath);
+                        await DeleteItemsInDirectory(realPath, output);
 
                         System.GC.Collect();
                         System.GC.WaitForPendingFinalizers();
-                        await RemoveDirectory(realPath, true);
+                        await RemoveDirectory(realPath, output, true);
                     }
                 }
             }
@@ -501,9 +475,11 @@ namespace TrustedUninstaller.Shared.Actions
                     var lockedFilesList = new List<string> { "MpOAV.dll", "MsMpLics.dll", "EppManifest.dll", "MpAsDesc.dll", "MpClient.dll", "MsMpEng.exe" };
                     var fileName = realPath.Split('\\').LastOrDefault();
 
+                    
                     System.GC.Collect();
                     System.GC.WaitForPendingFinalizers();
-                    await DeleteFile(realPath);
+
+                    await DeleteFile(realPath, output);
 
                     if (File.Exists(realPath))
                     {
@@ -514,11 +490,11 @@ namespace TrustedUninstaller.Shared.Actions
                         };
                         try
                         {
-                            permAction.RunTaskOnMainThread();
+                            permAction.RunTaskOnMainThread(output);
                         }
                         catch (Exception e)
                         {
-                            ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "FileAction Error", realPath);
+                            Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                         }
                         
                         TaskKillAction taskKillAction = new TaskKillAction();
@@ -530,7 +506,7 @@ namespace TrustedUninstaller.Shared.Actions
                             {
                                 //ServiceAction won't work here due to it not being able to detect driver services.
                                 var cmdAction = new CmdAction();
-                                Console.WriteLine($"Removing driver service {driverService}...");
+                                output.WriteLineSafe("Info", $"Removing driver service {driverService}...");
 
                                 // TODO: Replace with win32
                                 try
@@ -542,7 +518,7 @@ namespace TrustedUninstaller.Shared.Actions
                                 }
                                 catch (Exception e)
                                 {
-                                    ErrorLogger.WriteToErrorLog("Service uninstall failed: " + e.Message, e.StackTrace, "FileAction Warning", RawPath);
+                                    Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                                 }
                                 
                                 WinUtil.CheckKph();
@@ -550,17 +526,16 @@ namespace TrustedUninstaller.Shared.Actions
                                 cmdAction.Command = Environment.Is64BitOperatingSystem ?
                                     $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction stop" :
                                     $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction stop";
-                                if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
+                                if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread(output);
 
                                 cmdAction.Command = Environment.Is64BitOperatingSystem ?
                                     $"ProcessHacker\\x64\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction delete" :
                                     $"ProcessHacker\\x86\\ProcessHacker.exe -s -elevate -c -ctype service -cobject {driverService} -caction delete";
-                                if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread();
+                                if (AmeliorationUtil.UseKernelDriver) cmdAction.RunTaskOnMainThread(output);
                             }
                             catch (Exception servException)
                             {
-                                ErrorLogger.WriteToErrorLog(servException.Message, servException.StackTrace,
-                                    $"FileAction Error: Error trying to delete driver service {driverService}.", realPath);
+                                Log.WriteExceptionSafe(LogType.Warning, servException, output.LogOptions);
                             }
                         }
 
@@ -571,16 +546,16 @@ namespace TrustedUninstaller.Shared.Actions
                                 ProcessName = "MsMpEng"
                             };
 
-                            await killAction.RunTask();
+                            await killAction.RunTask(output);
 
                             killAction.ProcessName = "NisSrv";
-                            await killAction.RunTask();
+                            await killAction.RunTask(output);
 
                             killAction.ProcessName = "SecurityHealthService";
-                            await killAction.RunTask();
+                            await killAction.RunTask(output);
 
                             killAction.ProcessName = "smartscreen";
-                            await killAction.RunTask();
+                            await killAction.RunTask(output);
 
                         }
 
@@ -591,8 +566,7 @@ namespace TrustedUninstaller.Shared.Actions
                         }
                         catch (Exception e)
                         {
-                            ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                                $"FileAction Error", realPath);
+                            Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                         }
                         var delay = 0;
 
@@ -612,22 +586,22 @@ namespace TrustedUninstaller.Shared.Actions
                                     }
                                     catch (Exception e)
                                     {
-                                        Console.WriteLine($"\r\nError: Could not get amount of dependent services for {serviceName}.\r\nException: " + e.Message);
+                                        output.WriteLineSafe("Warning", $"\r\nError: Could not get amount of dependent services for {serviceName}.\r\nException: " + e.Message);
                                     }
                                 }
                             } catch (Exception e)
                             {
-                                Console.WriteLine($"\r\nError: Could not get amount of services locking file.\r\nException: " + e.Message);
+                                output.WriteLineSafe("Warning", $"\r\nError: Could not get amount of services locking file.\r\nException: " + e.Message);
                             }
                         }
-                        if (svcCount > 8) Console.WriteLine("Amount of locking services exceeds 8, skipping...");
+                        if (svcCount > 8) output.WriteLineSafe("Info", "Amount of locking services exceeds 8, skipping...");
                         
                         while (processes.Any() && delay <= 800 && svcCount <= 8)
                         {
-                            Console.WriteLine("Processes locking the file:");
+                            output.WriteLineSafe("Info", "Processes locking the file:");
                             foreach (var process in processes)
                             {
-                                Console.WriteLine(process.ProcessName);
+                                output.WriteLineSafe("Info", process.ProcessName);
                             }
 
                             foreach (var process in processes)
@@ -636,19 +610,19 @@ namespace TrustedUninstaller.Shared.Actions
                                 {
                                     if (process.ProcessName.Equals("TrustedUninstaller.CLI"))
                                     {
-                                        Console.WriteLine("Skipping TU.CLI...");
+                                        output.WriteLineSafe("Info", "Skipping TU.CLI...");
                                         continue;
                                     }
                                     if (Regex.Match(process.ProcessName, "ame.?wizard", RegexOptions.IgnoreCase).Success)
                                     {
-                                        Console.WriteLine("Skipping AME Wizard...");
+                                        output.WriteLineSafe("Info", "Skipping AME Wizard...");
                                         continue;
                                     }
 
                                     taskKillAction.ProcessName = process.ProcessName;
                                     taskKillAction.ProcessID = process.Id;
 
-                                    Console.WriteLine($"Killing {process.ProcessName} with PID {process.Id}... it is locking {realPath}");
+                                    output.WriteLineSafe("Info", $"Killing {process.ProcessName} with PID {process.Id}... it is locking {realPath}");
                                 }
                                 catch (InvalidOperationException)
                                 {
@@ -660,12 +634,11 @@ namespace TrustedUninstaller.Shared.Actions
 
                                 try
                                 {
-                                    await taskKillAction.RunTask();
+                                    await taskKillAction.RunTask(output);
                                 }
                                 catch (Exception e)
                                 {
-                                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                                        $"FileAction Error: Could not kill process {process.ProcessName}.");
+                                    Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                                 }
                             }
 
@@ -681,33 +654,30 @@ namespace TrustedUninstaller.Shared.Actions
                             }
                             catch (Exception e)
                             {
-                                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                                    $"FileAction Error", realPath);
+                                Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                             }
                         
                             delay += 100;
                         }
                         if (delay >= 800)
-                            ErrorLogger.WriteToErrorLog($"Could not kill locking processes for file '{realPath}'. Process termination loop exceeded max cycles (8).",
-                                Environment.StackTrace, "FileAction Error");
+                            Log.WriteSafe(LogType.Warning, "Could not kill locking processes for file '{realPath}'. Process termination loop exceeded max cycles (8).", new SerializableTrace(), output.LogOptions);
 
                         if (Path.GetExtension(realPath).Equals(".exe", StringComparison.OrdinalIgnoreCase))
                         {
-                            await new TaskKillAction() { ProcessName = Path.GetFileNameWithoutExtension(realPath) }.RunTask();
+                            await new TaskKillAction() { ProcessName = Path.GetFileNameWithoutExtension(realPath) }.RunTask(output);
                         }
                         
-                        await DeleteFile(realPath, true);
+                        await DeleteFile(realPath, output, true);
                     }
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                        $"FileAction Error: Error while trying to delete {realPath}.");
+                    Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                 }
             }
             else
             {
-                Console.WriteLine($"File or directory '{realPath}' not found.");
+                output.WriteLineSafe("Info", $"File or directory '{realPath}' not found.");
             }
 
             InProgress = false;

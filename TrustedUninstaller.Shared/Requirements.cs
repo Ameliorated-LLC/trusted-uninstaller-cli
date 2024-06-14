@@ -13,6 +13,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Xml.Serialization;
+using Core;
+using Interprocess;
 using Microsoft.Win32;
 using TrustedUninstaller.Shared;
 using TrustedUninstaller.Shared.Actions;
@@ -225,100 +227,10 @@ namespace TrustedUninstaller.Shared
         {
             public async Task<bool> IsMet()
             {
-                try
-                {
-                    if (Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\WinDefend") != null && new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }.GetStatus() != UninstallTaskStatus.Completed)
-                        return false;
-                    
-                    if (Registry.ClassesRoot.OpenSubKey(@"CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32") != null) return false;
-                    if (Registry.ClassesRoot.OpenSubKey(@"CLSID\{a463fcb9-6b1c-4e0d-a80b-a2ca7999e25d}\InprocServer32") != null) return false;
-                    var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity");
-                    if (key != null && (int)key.GetValue("Enabled") != 0)
-                    {
-                        return false;
-                    }
-                }
-                catch (Exception e)
-                {
-                }
-                return RemnantsOnly();
-            }
-            public static bool RemnantsOnly()
-            {
-                if (Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\WinDefend") != null)
-                    return false;
-                return Process.GetProcessesByName("MsMpEng").Length == 0;
+                return !Process.GetProcessesByName("MsMpEng").Any() && !Process.GetProcessesByName("SecurityHealthService").Any() && !Process.GetProcessesByName("MpDefenderCoreService").Any();
             }
 
-            public async Task<bool> Meet()
-            {
-                throw new NotImplementedException();
-                
-                OnProgressAdded(30);
-                try
-                {
-                    //Scheduled task to run the program on logon, and remove defender notifications
-                    var runOnLogOn = new CmdAction()
-                    {
-                        Command = $"schtasks /create /tn \"AME Wizard\" /tr \"{Assembly.GetExecutingAssembly().Location}\" /sc onlogon /RL HIGHEST /f",
-                        Wait = false
-                    };
-                    await runOnLogOn.RunTask();
-
-                    OnProgressAdded(10);
-                    var disableNotifs = new CmdAction()
-                    {
-                        Command = $"reg add \"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender Security Center\\Notifications\" /v DisableNotifications /t REG_DWORD /d 1 /f"
-                    };
-                    await disableNotifs.RunTask();
-                    OnProgressAdded(10);
-                    var defenderService = new RunAction()
-                    {
-                        Exe = $"NSudoLC.exe",
-                        Arguments = "-U:T -P:E -M:S -Priority:RealTime -UseCurrentConsole -Wait reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend\" /f",
-                        BaseDir = true,
-                        CreateWindow = false
-                    };
-                    await defenderService.RunTask();
-                    OnProgressAdded(20);
-                    // MpOAV.dll normally is in use by a lot of processes. This prevents that.
-                    var MpOAVCLSID = new RunAction()
-                    {
-                        Exe = $"NSudoLC.exe",
-                        Arguments = @"-U:T -P:E -M:S -Priority:RealTime -Wait reg delete ""HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32"" /f",
-                        BaseDir = true,
-                        CreateWindow = false
-                    };
-                    await MpOAVCLSID.RunTask();
-                    OnProgressAdded(20);
-
-                    if (Registry.LocalMachine.OpenSubKey("SYSTEM\\CurrentControlSet\\Services\\WinDefend") != null)
-                    {
-                        throw new Exception("Could not remove WinDefend service.");
-                    }
-                    OnProgressAdded(10);
-
-                    return true;
-                }
-                catch (Exception exception)
-                {
-                    ErrorLogger.WriteToErrorLog(exception.Message, exception.StackTrace,
-                        $"Could not remove Windows Defender.");
-
-                    return false;
-                    // TODO: Move this to requirements page view if any Meet calls return false
-                    try
-                    {
-                        var saveLogDir = System.Windows.Forms.Application.StartupPath + "\\AME Logs";
-                        if (Directory.Exists(saveLogDir)) Directory.Delete(saveLogDir, true);
-                        Directory.Move(Directory.GetCurrentDirectory() + "\\Logs", saveLogDir);
-                    }
-                    catch (Exception) { }
-
-                    //MessageBox.Show("Could not remove Windows Defender. Check the error logs and contact the team " +
-                    //    "for more information and assistance.", "Could not remove Windows Defender.", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
-            }
+            public async Task<bool> Meet() => throw new NotImplementedException();
         }
         
         public class DefenderToggled : RequirementBase, IRequirements
@@ -407,67 +319,26 @@ namespace TrustedUninstaller.Shared
             }
         }
 
-        private static Process _pendingUpdateCheckProcess = null;
         public class NoPendingUpdates : RequirementBase, IRequirements
         {
             public async Task<bool> IsMet()
             {
-                try
-                {
-                    if (_pendingUpdateCheckProcess != null && !_pendingUpdateCheckProcess.HasExited)
-                    {
-                        _pendingUpdateCheckProcess.Kill();
-                    }
-                }
-                catch (Exception e) { }
+                // Using WUApiLib can crash the entire application if
+                // Windows Update is faulty. For that reason we use a
+                // separate process. To replicate, use an ameliorated
+                // system and copy wuapi.dll & wuaeng.dll to System32.
+                var result = await InterLink.ExecuteDisposableSafeAsync(TargetLevel.User, () => CheckDisposable(), logExceptions: true);
+                if (result.Failed)
+                    return true;
 
-                bool updatesFound = false;
-                try
-                {
-                    // Using WUApiLib can crash the entire application if
-                    // Windows Update is faulty. For that reason we use a
-                    // separate process. To replicate, use an ameliorated
-                    // system and copy wuapi.dll & wuaeng.dll to System32.
-
-                    _pendingUpdateCheckProcess = new Process();
-                    _pendingUpdateCheckProcess.StartInfo = new ProcessStartInfo
-                    {
-                        FileName = Assembly.GetEntryAssembly().Location,
-                        Arguments = "-CheckPendingUpdates",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        CreateNoWindow = true
-                    };
-
-                    _pendingUpdateCheckProcess.OutputDataReceived += delegate(object sender, DataReceivedEventArgs args)
-                    {
-                        if (!string.IsNullOrWhiteSpace(args.Data))
-                            bool.TryParse(args.Data, out updatesFound);
-                    };
-
-                    _pendingUpdateCheckProcess.Start();
-
-                    _pendingUpdateCheckProcess.BeginOutputReadLine();
-
-                    if (!_pendingUpdateCheckProcess.WaitForExit(55000))
-                    {
-                        _pendingUpdateCheckProcess.Kill();
-                        throw new TimeoutException();
-                    }
-
-                    _pendingUpdateCheckProcess.CancelOutputRead();
-                    _pendingUpdateCheckProcess.Dispose();
-                }
-                catch (Exception e) {  }
-
-                return !updatesFound;
+                return result.Value;
             }
 
             public Task<bool> Meet() => throw new NotImplementedException();
-
-            public static bool Check()
+            
+            [InterprocessMethod(Level.User)]
+            private static bool CheckDisposable()
             {
-                bool result = false;
                 try
                 {
                     var updateSession = new UpdateSession();
@@ -476,9 +347,7 @@ namespace TrustedUninstaller.Shared
 
                     SearchCompletedCallback searchCompletedCallback = new SearchCompletedCallback();
 
-                    ISearchJob searchJob = updateSearcher.BeginSearch(
-                        "IsInstalled=0 And IsHidden=0 And Type='Software' And DeploymentAction=*",
-                        searchCompletedCallback, null);
+                    ISearchJob searchJob = updateSearcher.BeginSearch("IsInstalled=0 And IsHidden=0 And Type='Software' And DeploymentAction=*", searchCompletedCallback, null);
 
                     try
                     {
@@ -493,15 +362,15 @@ namespace TrustedUninstaller.Shared
 
                     if (searchResult.Updates.Cast<IUpdate>().Any(x => x.IsDownloaded))
                     {
-                        result = true;
+                        return false;
                     }
                 }
                 catch (Exception e)
                 {
-                    result = false;
+                    Log.EnqueueExceptionSafe(e);
+                    return true;
                 }
-
-                return result;
+                return true;
             }
         }
         
@@ -529,7 +398,7 @@ namespace TrustedUninstaller.Shared
         {
             public bool IsMet(string[] builds)
             {
-                return builds.Any(x => x.Equals(Globals.WinVer.ToString()));
+                return builds.Any(x => x.Equals(Win32.SystemInfoEx.WindowsVersion.BuildNumber.ToString()));
             }
 
             public Task<bool> Meet() => throw new NotImplementedException();

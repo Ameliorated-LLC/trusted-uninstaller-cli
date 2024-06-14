@@ -1,8 +1,12 @@
 ﻿using Microsoft.Win32.SafeHandles;
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.ServiceProcess;
+using Interprocess;
 
 namespace TrustedUninstaller.Shared
 {
@@ -57,7 +61,6 @@ namespace TrustedUninstaller.Shared
 
     public class NativeProcess
     {
-
         [DllImport("kernel32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool CreateProcess(
@@ -96,11 +99,22 @@ namespace TrustedUninstaller.Shared
         const UInt32 WAIT_OBJECT_0 = 0x00000000;
         const UInt32 WAIT_TIMEOUT = 0x00000102;
 
-        public static Process? Process;
-        public static bool StartProcess(string path, int parent, string playbookDir)
+        [InterprocessMethod(Level.Administrator)]
+        public static int StartProcessAsTI(string path, string arguments)
         {
-            Process = null;
+            var controller = new ServiceController("TrustedInstaller");
+            if (controller.Status != ServiceControllerStatus.Running)
+            {
+                controller.Start();
+                controller.WaitForStatus(ServiceControllerStatus.Running);
+            }
 
+            var targetProcess = Process.GetProcessesByName("TrustedInstaller").FirstOrDefault();
+            if (targetProcess == null)
+                throw new Exception("Could not find TrustedInstaller process.");
+
+            var parent = targetProcess.Id;
+            
             // Create a new process with a different parent process
             // https://stackoverflow.com/questions/10554913/how-to-call-createprocess-with-startupinfoex-from-c-sharp-and-re-parent-the-ch
             var pInfo = new PROCESS_INFORMATION();
@@ -113,16 +127,12 @@ namespace TrustedUninstaller.Shared
                 var lpSize = IntPtr.Zero;
                 var success = InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref lpSize);
                 if (success || lpSize == IntPtr.Zero)
-                {
-                    return false;
-                }
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
 
                 sInfoEx.lpAttributeList = Marshal.AllocHGlobal(lpSize);
                 success = InitializeProcThreadAttributeList(sInfoEx.lpAttributeList, 1, 0, ref lpSize);
                 if (!success)
-                {
-                    return false;
-                }
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
 
                 var parentHandle = Process.GetProcessById(parent).Handle;
                 // This value should persist until the attribute list is destroyed using the DeleteProcThreadAttributeList function
@@ -138,10 +148,7 @@ namespace TrustedUninstaller.Shared
                     IntPtr.Zero,
                     IntPtr.Zero);
                 if (!success)
-                {
-                    return false;
-                }
-
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
 
                 var pSec = new SECURITY_ATTRIBUTES();
                 var tSec = new SECURITY_ATTRIBUTES();
@@ -149,7 +156,7 @@ namespace TrustedUninstaller.Shared
                 tSec.nLength = Marshal.SizeOf(tSec);
 
                 CreateProcess(null,
-                    $"\"{path}\" \"{playbookDir}\"",
+                    $"\"{path}\"{(String.IsNullOrEmpty(arguments) ? null : " " + arguments)}",
                     ref pSec,
                     ref tSec,
                     false,
@@ -159,10 +166,7 @@ namespace TrustedUninstaller.Shared
                     ref sInfoEx,
                     out pInfo);
                 
-                //WaitForSingleObject(pInfo.hProcess, INFINITE);
-                Process = Process.GetProcessById(pInfo.dwProcessId);
-                
-                return true;
+                return pInfo.dwProcessId;
             }
             finally
             {

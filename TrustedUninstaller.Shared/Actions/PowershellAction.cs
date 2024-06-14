@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -6,15 +7,17 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Core;
+using JetBrains.Annotations;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class PowerShellAction : TaskAction, ITaskAction
+    public class PowerShellAction : Tasks.TaskActionWithOutputProcessor, ITaskAction
     {
-        public void RunTaskOnMainThread()
+        public void RunTaskOnMainThread(Output.OutputWriter output)
         {
             if (InProgress) throw new TaskInProgressException("Another Powershell action was called while one was in progress.");
             InProgress = true;
@@ -22,14 +25,14 @@ namespace TrustedUninstaller.Shared.Actions
             var privilegeText = RunAs == Privilege.CurrentUser ? " as the current user" : RunAs == Privilege.CurrentUserElevated ? " as the current user elevated" : RunAs == Privilege.System ?
                 " as the system account" : "";
             
-            Console.WriteLine($"Running PowerShel command '{Command}'{privilegeText}...");
-            
+            output.WriteLineSafe("Info", $"Running PowerShell command '{Command}'{privilegeText}...");
+
             WinUtil.CheckKph();
 
             if (RunAs == Privilege.TrustedInstaller)
-                RunAsProcess();
+                RunAsProcess(output);
             else
-                RunAsPrivilegedProcess();
+                RunAsPrivilegedProcess(output);
 
             InProgress = false;
             return;
@@ -48,22 +51,24 @@ namespace TrustedUninstaller.Shared.Actions
         
         [YamlMember(typeof(bool), Alias = "exeDir")]
         public bool ExeDir { get; set; } = false;
+        
+        [YamlMember(typeof(Dictionary<string, ExitCodeAction>), Alias = "handleExitCodes")]
+        [CanBeNull] public Dictionary<string, ExitCodeAction> HandleExitCodes { get; set; } = null;
 
         [YamlMember(typeof(string), Alias = "weight")]
         public int ProgressWeight { get; set; } = 1;
         
-        
         private int? ExitCode { get; set; }
-        public string? StandardError { get; set; }
-        public string StandardOutput { get; set; }
         
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => false;
         
         private bool InProgress { get; set; }
         public void ResetProgress() => InProgress = false;
 
         public string ErrorString() => $"PowerShellAction failed to run command '{Command}'.";
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             if (InProgress)
             {
@@ -73,14 +78,14 @@ namespace TrustedUninstaller.Shared.Actions
             return ExitCode == null ? UninstallTaskStatus.ToDo: UninstallTaskStatus.Completed;
         }
 
-        public Task<bool> RunTask()
+        public Task<bool> RunTask(Output.OutputWriter output)
         {
             return null;
         }
         
-        private void RunAsProcess()
+        private void RunAsProcess(Output.OutputWriter output)
         {            
-            var process = new Process();
+            using var process = new Process();
             var startInfo = new ProcessStartInfo
             {
                 WindowStyle = ProcessWindowStyle.Normal,
@@ -101,76 +106,51 @@ namespace TrustedUninstaller.Shared.Actions
             }
                 
             process.StartInfo = startInfo;
-            process.Start();
+            using (var handler = new OutputHandler("Process", process, output))
+            {
+                handler.StartProcess(RunAs);
+             
+                if (!Wait)
+                {
+                    return;
+                }
                 
-            if (!Wait)
-            {
-                process.Dispose();
-                return;
-            }
-
-            var error = new StringBuilder();
-            process.OutputDataReceived += ProcOutputHandler;
-            process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs args)
-            {
-                if (!String.IsNullOrEmpty(args.Data))
-                    error.AppendLine(args.Data);
+                if (Timeout.HasValue)
+                {
+                    var exited = process.WaitForExit(Timeout.Value);
+                    if (!exited)
+                    {
+                        handler.CancelReading();
+                        process.Kill();
+                        throw new TimeoutException($"Executable run timeout exceeded.");
+                    }
+                }
                 else
-                    error.AppendLine();
-            };
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
-            if (Timeout != null)
-            {
-                var exited = process.WaitForExit(Timeout.Value);
-                if (!exited)
                 {
-                    process.Kill();
-                    throw new TimeoutException($"Command '{Command}' timeout exceeded.");
+                    bool exited = process.WaitForExit(30000);
+
+                    // WaitForExit alone seems to not be entirely reliable
+                    while (!exited && PowerShellRunning(process.Id))
+                    {
+                        exited = process.WaitForExit(30000);
+                    }
                 }
             }
-            else
-            {
-                bool exited = process.WaitForExit(30000);
 
-                // WaitForExit alone seems to not be entirely reliable
-                while (!exited && PowerShellRunning(process.Id))
+            ExitCode = Wrap.ExecuteSafe(() => process.ExitCode, true, output.LogOptions).Value;
+            if (ExitCode != 0)
+                output.WriteLineSafe("Info", $"PowerShell instance exited with error code: {ExitCode}");
+            
+            if (HandleExitCodes != null)
+            {
+                foreach (string key in HandleExitCodes.Keys)
                 {
-                    exited = process.WaitForExit(30000);
+                    if (IsApplicableNumber(key, ExitCode.Value))
+                    {
+                        throw new ErrorHandlingException(HandleExitCodes[key], $"PowerShell command '{Command}' exit code {ExitCode.Value} handled with filter '{key}' --> {HandleExitCodes[key]}.");
+                    }
                 }
             }
-                
-            StandardError = error.ToString();
-
-            int exitCode = 0;
-            try
-            {
-                exitCode = process.ExitCode;
-            }
-            catch (Exception ex)
-            {
-                ErrorLogger.WriteToErrorLog("Error fetching process exit code. (1)", null, "PowerShellAction Error", Command);
-            }
-            
-            if (exitCode != 0)
-            {
-                Console.WriteLine($"PowerShell instance exited with error code: {exitCode}");
-                if (!String.IsNullOrWhiteSpace(StandardError)) Console.WriteLine($"Error message: {StandardError}");
-
-                ErrorLogger.WriteToErrorLog("PowerShell exited with a non-zero exit code: " + exitCode, null, "PowerShellAction Error", Command);
-                
-                this.ExitCode = exitCode;
-            }
-            else
-            {
-                if (!String.IsNullOrWhiteSpace(StandardError)) Console.WriteLine($"Error output: {StandardError}");
-                ExitCode = 0;
-            }
-            
-            process.CancelOutputRead();
-            process.CancelErrorRead();
-            process.Dispose();
         }
         
         private static bool PowerShellRunning(int id)
@@ -185,10 +165,9 @@ namespace TrustedUninstaller.Shared.Actions
             }
         }
         
-        private void RunAsPrivilegedProcess()
+        private void RunAsPrivilegedProcess(Output.OutputWriter output)
         {
-                   
-            var process = new AugmentedProcess.Process();
+            using var process = new AugmentedProcess.Process();
             var startInfo = new AugmentedProcess.ProcessStartInfo
             {
                 WindowStyle = ProcessWindowStyle.Normal,
@@ -207,59 +186,34 @@ namespace TrustedUninstaller.Shared.Actions
                 startInfo.WindowStyle = ProcessWindowStyle.Hidden;
                 startInfo.UseShellExecute = true;
             }
-                
-            process.StartInfo = startInfo;
-            ProcessPrivilege.StartPrivilegedTask(process, RunAs);
-                
-            if (!Wait)
-            {
-                process.Dispose();
-                return;
-            }
-
-            var error = new StringBuilder();
-            process.OutputDataReceived += PrivilegedProcOutputHandler;
-            process.ErrorDataReceived += delegate(object sender, AugmentedProcess.DataReceivedEventArgs args)
-            {
-                if (!String.IsNullOrEmpty(args.Data))
-                    error.AppendLine(args.Data);
-                else
-                    error.AppendLine();
-            };
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
-            if (Timeout != null)
-            {
-                var exited = process.WaitForExit(Timeout.Value);
-                if (!exited)
-                {
-                    process.Kill();
-                    throw new TimeoutException($"Command '{Command}' timeout exceeded.");
-                }
-            }
-                
-            else process.WaitForExit();
-                
-            StandardError = error.ToString();
-            if (process.ExitCode != 0)
-            {
-                Console.WriteLine($"PowerShell instance exited with error code: {process.ExitCode}");
-                if (!String.IsNullOrWhiteSpace(StandardError)) Console.WriteLine($"Error message: {StandardError}");
-
-                ErrorLogger.WriteToErrorLog("PowerShell exited with a non-zero exit code: " + process.ExitCode, null, "PowerShellAction Error", Command);
-                
-                this.ExitCode = process.ExitCode;
-            }
-            else
-            {
-                if (!String.IsNullOrWhiteSpace(StandardError)) Console.WriteLine($"Error output: {StandardError}");
-                ExitCode = 0;
-            }
             
-            process.CancelOutputRead();
-            process.CancelErrorRead();
-            process.Dispose();
+            process.StartInfo = startInfo;
+            
+            using (var handler = new OutputHandler("Process", process, output))
+            {
+                handler.StartProcess(RunAs);
+             
+                if (!Wait)
+                {
+                    return;
+                }
+                
+                if (Timeout.HasValue)
+                {
+                    var exited = process.WaitForExit(Timeout.Value);
+                    if (!exited)
+                    {
+                        handler.CancelReading();
+                        process.Kill();
+                        throw new TimeoutException($"Executable run timeout exceeded.");
+                    }
+                }
+                else process.WaitForExit();
+            }
+
+            ExitCode = Wrap.ExecuteSafe(() => process.ExitCode, true, output.LogOptions).Value;
+            if (ExitCode != 0)
+                output.WriteLineSafe("Info", $"PowerShell instance exited with error code: {ExitCode}");
         }
         
         private static bool ExeRunning(string exe, int id)
@@ -271,43 +225,6 @@ namespace TrustedUninstaller.Shared.Actions
             catch (Exception)
             {
                 return false;
-            }
-        }
-
-        private void PrivilegedProcOutputHandler(object sendingProcess, AugmentedProcess.DataReceivedEventArgs outLine)
-        {
-            var outputString = outLine.Data;
-
-            // Collect the sort command output. 
-            if (!String.IsNullOrEmpty(outLine.Data))
-            {
-                if (outputString.Contains("\\AME"))
-                {
-                    outputString = outputString.Substring(outputString.IndexOf('>') + 1);
-                }
-                Console.WriteLine(outputString);
-            }
-            else
-            {
-                Console.WriteLine();
-            }
-        }
-        private void ProcOutputHandler(object sendingProcess, DataReceivedEventArgs outLine)
-        {
-            var outputString = outLine.Data;
-
-            // Collect the sort command output. 
-            if (!String.IsNullOrEmpty(outLine.Data))
-            {
-                if (outputString.Contains("\\AME"))
-                {
-                    outputString = outputString.Substring(outputString.IndexOf('>') + 1);
-                }
-                Console.WriteLine(outputString);
-            }
-            else
-            {
-                Console.WriteLine();
             }
         }
     }

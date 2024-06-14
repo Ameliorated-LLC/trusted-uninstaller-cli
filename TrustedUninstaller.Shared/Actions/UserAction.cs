@@ -5,12 +5,13 @@ using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Serialization;
 using System.DirectoryServices.AccountManagement;
 using System.Security.Principal;
+using Core;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class UserAction : TaskAction, ITaskAction
+    public class UserAction : Tasks.TaskAction, ITaskAction
     {
-        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
+        public void RunTaskOnMainThread(Output.OutputWriter output) { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "name")]
         public string Username { get; set; } = "";
         [YamlMember(typeof(bool), Alias = "admin")]
@@ -19,13 +20,15 @@ namespace TrustedUninstaller.Shared.Actions
         [YamlMember(typeof(string), Alias = "weight")]
         public int ProgressWeight { get; set; } = 1;
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => true;
         
         private bool InProgress { get; set; }
         public void ResetProgress() => InProgress = false;
         
         public string ErrorString() => $"UserAction failed to change permissions for user {Username}.";
         
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             using var pc = new PrincipalContext(ContextType.Machine);
 
@@ -46,14 +49,14 @@ namespace TrustedUninstaller.Shared.Actions
             return isAdmin ? UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo;
         }
 
-        public async Task<bool> RunTask()
+        public async Task<bool> RunTask(Output.OutputWriter output)
         {
-            if (this.GetStatus() != UninstallTaskStatus.ToDo)
+            if (this.GetStatus(output) != UninstallTaskStatus.ToDo)
             {
                 return false;
             }
             
-            Console.WriteLine($"Changing permissions for user '{Username}'...");
+            output.WriteLineSafe("Info", $"Changing permissions for user '{Username}'...");
 
             return await Task.Run(() =>
             {

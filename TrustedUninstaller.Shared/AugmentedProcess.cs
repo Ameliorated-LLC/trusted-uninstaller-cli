@@ -17,6 +17,7 @@ using System.Security.Permissions;
 using System.Runtime.Versioning;
 using System.Runtime.ConstrainedExecution;
 using Microsoft.Win32;
+using Core;
 
 namespace TrustedUninstaller.Shared
 {

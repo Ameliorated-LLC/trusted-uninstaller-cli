@@ -8,13 +8,14 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using Core;
 
 namespace TrustedUninstaller.Shared.Actions
 {
     // Integrate ame-assassin later
-    internal class SystemPackageAction : TaskAction, ITaskAction
+    internal class SystemPackageAction : Tasks.TaskAction, ITaskAction
     {
-        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
+        public void RunTaskOnMainThread(Output.OutputWriter output) { throw new NotImplementedException(); }
         public enum Architecture
         {
             amd64 = 0,
@@ -41,24 +42,26 @@ namespace TrustedUninstaller.Shared.Actions
         [YamlMember(typeof(string[]), Alias = "weight")]
         public int ProgressWeight { get; set; } = 15;
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => false;
         
         private bool InProgress { get; set; }
         public void ResetProgress() => InProgress = false;
 
         public string ErrorString() => $"SystemPackageAction failed to remove '{Name}'.";
         
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             if (InProgress) return UninstallTaskStatus.InProgress;
             return HasFinished ? UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo;
         }
         private bool HasFinished = false;
-        public async Task<bool> RunTask()
+        public async Task<bool> RunTask(Output.OutputWriter output)
         {
             if (InProgress) throw new TaskInProgressException("Another Appx action was called while one was in progress.");
             InProgress = true;
 
-            Console.WriteLine($"Removing system package '{Name}'...");
+            output.WriteLineSafe("Info", $"Removing system package '{Name}'...");
 
             var excludeArgs = new StringBuilder("");
             if (RegexExcludeList != null)
@@ -90,6 +93,8 @@ namespace TrustedUninstaller.Shared.Actions
                 RedirectStandardError = true
             };
 
+            outputWriter = output;
+            
             var proc = Process.Start(psi);
             
             proc.OutputDataReceived += ProcOutputHandler;
@@ -106,36 +111,19 @@ namespace TrustedUninstaller.Shared.Actions
                 exited = proc.WaitForExit(30000);
             }
             
-            using (var log = new StreamWriter("Logs\\Packages.txt", true))
-                log.Write(output.ToString());
-            
             HasFinished = true;
 
             InProgress = false;
             return true;
         }
-        
-        private StringBuilder output = new StringBuilder("");
-        private bool PleaseWait = false;
+
+        private Output.OutputWriter outputWriter = null;
         private void ProcOutputHandler(object sendingProcess, DataReceivedEventArgs outLine)
         {
-            var write = outLine == null ? "" : outLine.Data;
-            output.Append(write + Environment.NewLine);
-            
-            if (String.IsNullOrEmpty(write)) return;
-            
-            if (write.StartsWith("--- Removing"))
-            {
-                Console.WriteLine(write.Substring(4, write.Length - 4));
-                PleaseWait = true;
-            }
-            if (write.StartsWith("Waiting for the service to stop...") && PleaseWait)
-            {
-                PleaseWait = false;
-                Console.WriteLine("This may take some time...");
-            }
+            if (!string.IsNullOrWhiteSpace(outLine.Data))
+                outputWriter.WriteLineSafe("Process", outLine.Data);
         }
-        
+
         private static bool ExeRunning(Process process)
         {
             try

@@ -3,15 +3,18 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Core;
 using TrustedUninstaller.Shared.Tasks;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    class LanguageAction : TaskAction, ITaskAction
+    class LanguageAction : Tasks.TaskAction, ITaskAction
     {
-        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
+        public void RunTaskOnMainThread(Output.OutputWriter output) { throw new NotImplementedException(); }
         public int ProgressWeight { get; set; } = 1;
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => true;
         
         private bool InProgress { get; set; }
         public void ResetProgress() => InProgress = false;
@@ -25,15 +28,15 @@ namespace TrustedUninstaller.Shared.Actions
         [DllImport("intl.cpl", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern int IntlUpdateSystemLocale(string LocaleName, int dwFlags);
 
-        public UninstallTaskStatus GetStatus() =>
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output) =>
             InputLanguage.InstalledInputLanguages.Cast<InputLanguage>()
                 .Any(c => c.Culture.IetfLanguageTag == this.Tag)
                 ? UninstallTaskStatus.Completed
                 : UninstallTaskStatus.ToDo;
 
-        public async Task<bool> RunTask()
+        public async Task<bool> RunTask(Output.OutputWriter output)
         {
-            if (GetStatus() != UninstallTaskStatus.ToDo)
+            if (GetStatus(output) != UninstallTaskStatus.ToDo)
             {
                 return false;
             }

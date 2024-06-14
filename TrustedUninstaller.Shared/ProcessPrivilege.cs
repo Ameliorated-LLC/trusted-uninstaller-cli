@@ -4,51 +4,71 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Reflection;
-using System.Runtime.ConstrainedExecution;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Core;
 using Microsoft.Win32.SafeHandles;
-using TrustedUninstaller.Shared.Actions;
+using TrustedUninstaller.Shared;
 
-namespace TrustedUninstaller.Shared
+namespace TrustedUninstaller.Shared.Actions
 {
+    public enum Privilege
+    {
+        TrustedInstaller,
+        System,
+        CurrentUserTrustedInstaller,
+        CurrentUserElevated,
+        CurrentUser,
+    }
+
     public class ProcessPrivilege
     {
         private static Win32.TokensEx.SafeTokenHandle userToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
         private static Win32.TokensEx.SafeTokenHandle elevatedUserToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
+        private static Win32.TokensEx.SafeTokenHandle trustedInstallerUserToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
         private static Win32.TokensEx.SafeTokenHandle systemToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
         private static Win32.TokensEx.SafeTokenHandle impsersonatedSystemToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
         private static Win32.TokensEx.SafeTokenHandle lsassToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
 
         internal static void ResetTokens()
         {
+            userToken.Dispose();
+            elevatedUserToken.Dispose();
+            trustedInstallerUserToken.Dispose();
+            systemToken.Dispose();
+            impsersonatedSystemToken.Dispose();
+            lsassToken.Dispose();
             elevatedUserToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
             lsassToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
+            trustedInstallerUserToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
             systemToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
             impsersonatedSystemToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
             userToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
         }
-        
+
+        private static readonly object _startLock = new object();
+
         public static void StartPrivilegedTask(AugmentedProcess.Process process, Privilege privilege)
         {
-            var tcs = StartThread(process, privilege);
-            tcs.Task.Wait();
-            for (int i = 0; tcs.Task.Result != null && i <= 3; i++)
+            lock (_startLock)
             {
-                ErrorLogger.WriteToErrorLog("Error launching privileged process: " + tcs.Task.Result.Message, tcs.Task.Result.StackTrace, "PrivilegedProcess Warning",
-                    Path.GetFileName(process.StartInfo.FileName));
-                ResetTokens();
-                Thread.Sleep(500 * i);
-                tcs = StartThread(process, privilege);
+                var tcs = StartThread(process, privilege);
                 tcs.Task.Wait();
-            }
+                for (int i = 0; tcs.Task.Result != null && i <= 3; i++)
+                {
+                    Log.EnqueueExceptionSafe(LogType.Warning, tcs.Task.Result, "Error launching privileged process.", ("ExePath", Path.GetFileName(process.StartInfo.FileName)));
+                    ResetTokens();
+                    Thread.Sleep(500 * i);
+                    tcs = StartThread(process, privilege);
+                    tcs.Task.Wait();
+                }
 
-            if (tcs.Task.Result != null)
-                throw new SecurityException("Error launching privileged process.", tcs.Task.Result);
+                if (tcs.Task.Result != null)
+                    throw new SecurityException("Error launching privileged process.", tcs.Task.Result);
+            }
         }
 
         private static TaskCompletionSource<Exception> StartThread(AugmentedProcess.Process process, Privilege privilege)
@@ -62,15 +82,19 @@ namespace TrustedUninstaller.Shared
                     {
                         case (Privilege.System):
                             GetSystemToken();
-                            process.Start(AugmentedProcess.Process.CreateType.RawToken, ref systemToken);
+                            process.Start(AugmentedProcess.Process.CreateType.UserToken, ref systemToken);
                             break;
                         case (Privilege.CurrentUser):
                             GetUserToken(true);
                             process.Start(AugmentedProcess.Process.CreateType.UserToken, ref userToken);
                             break;
                         case (Privilege.CurrentUserElevated):
-                            GetElevatedUserToken();
-                            process.Start(AugmentedProcess.Process.CreateType.RawToken, ref elevatedUserToken);
+                            GetElevatedUserToken(false);
+                            process.Start(AugmentedProcess.Process.CreateType.UserToken, ref elevatedUserToken);
+                            break;
+                        case (Privilege.CurrentUserTrustedInstaller):
+                            GetElevatedUserToken(true);
+                            process.Start(AugmentedProcess.Process.CreateType.UserToken, ref trustedInstallerUserToken);
                             break;
                         default:
                             throw new ArgumentException("Unexpected.");
@@ -90,12 +114,31 @@ namespace TrustedUninstaller.Shared
 
         private static uint GetUserSession()
         {
-            var sessionId = Win32.WTS.WTSGetActiveConsoleSessionId();
-            if (sessionId != 0xFFFFFFFF) return sessionId;
+            var currentSessionId = (uint)Process.GetCurrentProcess().SessionId;
+
+            uint sessionId = Wrap.ExecuteSafe(() =>
+            {
+                sessionId = Win32.WTS.WTSGetActiveConsoleSessionId();
+                if (sessionId != 0xFFFFFFFF)
+                {
+                    bool success = Win32.WTS.WTSQuerySessionInformation(IntPtr.Zero, sessionId, Win32.WTS.WTS_INFO_CLASS.WTSConnectState,
+                        out IntPtr buffer, out int returned);
+
+                    if (success && Marshal.ReadInt32(buffer) == 0)
+                        return sessionId;
+                }
+                return 0xFFFFFFFF;
+            }, 0xFFFFFFFF).Value;
+            if (sessionId != 0xFFFFFFFF && sessionId == currentSessionId)
+                return sessionId;
+
             IntPtr pSessionInfo = IntPtr.Zero;
             Int32 count = 0;
-            if (Win32.WTS.WTSEnumerateSessions((IntPtr)null, 0, 1, ref pSessionInfo, ref count) == 0)
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Error enumerating user sessions.");
+            if (Win32.WTS.WTSEnumerateSessions(IntPtr.Zero, 0, 1, ref pSessionInfo, ref count) == 0)
+            {
+                Log.EnqueueExceptionSafe(new Win32Exception(Marshal.GetLastWin32Error(), "Error enumerating user sessions."));
+                return currentSessionId;
+            }
             Int32 dataSize = Marshal.SizeOf(typeof(Win32.WTS.WTS_SESSION_INFO));
             Int64 current = (Int64)pSessionInfo;
             for (int i = 0; i < count; i++)
@@ -107,7 +150,8 @@ namespace TrustedUninstaller.Shared
                 if (si.State == Win32.WTS.WTS_CONNECTSTATE_CLASS.WTSActive)
                 {
                     sessionId = (uint)si.SessionID;
-                    break;
+                    if (sessionId == currentSessionId)
+                        break;
                 }
             }
             Win32.WTS.WTSFreeMemory(pSessionInfo);
@@ -122,14 +166,14 @@ namespace TrustedUninstaller.Shared
                 var result = Win32.Tokens.ImpersonateLoggedOnUser(systemToken);
                 if (!result)
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Error impersonating system process token.");
-                
+
                 Win32.TokensEx.AdjustCurrentPrivilege(Win32.Tokens.SE_ASSIGNPRIMARYTOKEN_NAME);
                 Win32.TokensEx.AdjustCurrentPrivilege(Win32.Tokens.SE_INCREASE_QUOTA_NAME);
             }
-            
-            if (userToken.DangerousGetHandle() != IntPtr.Zero)
+
+            if (!userToken.IsInvalid)
                 return;
-            
+
             var sessionId = GetUserSession();
 
             if (Win32.WTS.WTSQueryUserToken(sessionId, out Win32.TokensEx.SafeTokenHandle wtsToken))
@@ -144,27 +188,26 @@ namespace TrustedUninstaller.Shared
                 }
                 return;
             }
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Error fetching active user session token.");
+            throw new Win32Exception("Error fetching active user session token: " + Marshal.GetLastWin32Error());
         }
 
-        private static void GetElevatedUserToken()
+        private static void GetElevatedUserToken(bool trustedInstaller)
         {
             GetSystemToken();
             var result = Win32.Tokens.ImpersonateLoggedOnUser(systemToken);
 
             if (!result)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Error impersonating system process token.");
-            
-            if (lsassToken.DangerousGetHandle() == IntPtr.Zero)
+
+            if (lsassToken.IsInvalid)
             {
-                var processHandle = Win32.Process.OpenProcess(Win32.Process.ProcessAccessFlags.QueryLimitedInformation, false, Process.GetProcessesByName("lsass").First().Id);
+                using var processHandle = Win32.Process.OpenProcess(Win32.Process.ProcessAccessFlags.QueryLimitedInformation, false, Process.GetProcessesByName("lsass").First().Id);
                 if (!Win32.Tokens.OpenProcessToken(processHandle,
                         Win32.Tokens.TokenAccessFlags.TOKEN_DUPLICATE |
                         Win32.Tokens.TokenAccessFlags.TOKEN_ASSIGN_PRIMARY |
                         Win32.Tokens.TokenAccessFlags.TOKEN_QUERY | Win32.Tokens.TokenAccessFlags.TOKEN_IMPERSONATE,
                         out var tokenHandle))
                 {
-                    Win32.CloseHandle(processHandle);
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to open process token for lsass.");
                 }
 
@@ -173,59 +216,71 @@ namespace TrustedUninstaller.Shared
                         Win32.Tokens.SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation,
                         Win32.Tokens.TOKEN_TYPE.TokenImpersonation, out lsassToken))
                 {
-                    Win32.CloseHandle(processHandle);
                     throw new Win32Exception(Marshal.GetLastWin32Error(),
                         "Failed to duplicate process token for lsass.");
                 }
-
-                Win32.CloseHandle(processHandle);
             }
 
-            
             result = Win32.Tokens.ImpersonateLoggedOnUser(lsassToken);
             if (!result)
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Error impersonating lsass process token.");
-            
-            
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Error impersonating lsass process token: " + Marshal.GetLastWin32Error());
             Win32.TokensEx.AdjustCurrentPrivilege(Win32.Tokens.SE_ASSIGNPRIMARYTOKEN_NAME);
             Win32.TokensEx.AdjustCurrentPrivilege(Win32.Tokens.SE_INCREASE_QUOTA_NAME);
-            
-            
-            if (elevatedUserToken.DangerousGetHandle() != IntPtr.Zero)
+
+            if ((trustedInstaller ? !trustedInstallerUserToken.IsInvalid : !elevatedUserToken.IsInvalid))
                 return;
-            
-            
+
             var privileges = new[]
             {
                 Win32.Tokens.SE_INCREASE_QUOTA_NAME,
-                Win32.Tokens.SE_MACHINE_ACCOUNT_NAME, Win32.Tokens.SE_SECURITY_NAME,
-                Win32.Tokens.SE_TAKE_OWNERSHIP_NAME, Win32.Tokens.SE_LOAD_DRIVER_NAME,
-                Win32.Tokens.SE_SYSTEM_PROFILE_NAME, Win32.Tokens.SE_SYSTEMTIME_NAME,
-                Win32.Tokens.SE_PROFILE_SINGLE_PROCESS_NAME, Win32.Tokens.SE_INCREASE_BASE_PRIORITY_NAME,
+                Win32.Tokens.SE_MACHINE_ACCOUNT_NAME,
+                Win32.Tokens.SE_SECURITY_NAME,
+                Win32.Tokens.SE_TAKE_OWNERSHIP_NAME,
+                Win32.Tokens.SE_LOAD_DRIVER_NAME,
+                Win32.Tokens.SE_SYSTEM_PROFILE_NAME,
+                Win32.Tokens.SE_SYSTEMTIME_NAME,
+                Win32.Tokens.SE_PROFILE_SINGLE_PROCESS_NAME,
+                Win32.Tokens.SE_INCREASE_BASE_PRIORITY_NAME,
                 Win32.Tokens.SE_CREATE_PERMANENT_NAME,
-                Win32.Tokens.SE_BACKUP_NAME, Win32.Tokens.SE_RESTORE_NAME, Win32.Tokens.SE_SHUTDOWN_NAME,
-                Win32.Tokens.SE_DEBUG_NAME, Win32.Tokens.SE_AUDIT_NAME, Win32.Tokens.SE_SYSTEM_ENVIRONMENT_NAME,
+                Win32.Tokens.SE_BACKUP_NAME,
+                Win32.Tokens.SE_RESTORE_NAME,
+                Win32.Tokens.SE_SHUTDOWN_NAME,
+                Win32.Tokens.SE_DEBUG_NAME,
+                Win32.Tokens.SE_AUDIT_NAME,
+                Win32.Tokens.SE_SYSTEM_ENVIRONMENT_NAME,
                 Win32.Tokens.SE_CHANGE_NOTIFY_NAME,
-                Win32.Tokens.SE_UNDOCK_NAME, Win32.Tokens.SE_SYNC_AGENT_NAME,
-                Win32.Tokens.SE_ENABLE_DELEGATION_NAME, Win32.Tokens.SE_MANAGE_VOLUME_NAME,
-                Win32.Tokens.SE_IMPERSONATE_NAME, Win32.Tokens.SE_CREATE_GLOBAL_NAME,
-                Win32.Tokens.SE_TRUSTED_CREDMAN_ACCESS_NAME, Win32.Tokens.SE_RELABEL_NAME,
+                Win32.Tokens.SE_UNDOCK_NAME,
+                Win32.Tokens.SE_SYNC_AGENT_NAME,
+                Win32.Tokens.SE_ENABLE_DELEGATION_NAME,
+                Win32.Tokens.SE_MANAGE_VOLUME_NAME,
+                Win32.Tokens.SE_IMPERSONATE_NAME,
+                Win32.Tokens.SE_CREATE_GLOBAL_NAME,
+                Win32.Tokens.SE_TRUSTED_CREDMAN_ACCESS_NAME,
+                Win32.Tokens.SE_RELABEL_NAME,
                 Win32.Tokens.SE_TIME_ZONE_NAME,
-                Win32.Tokens.SE_CREATE_SYMBOLIC_LINK_NAME, Win32.Tokens.SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME
+                Win32.Tokens.SE_CREATE_SYMBOLIC_LINK_NAME,
+                Win32.Tokens.SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME,
+                Win32.Tokens.SE_ASSIGNPRIMARYTOKEN_NAME,
+                Win32.Tokens.SE_REMOTE_SHUTDOWN_NAME,
+                Win32.Tokens.SE_INCREASE_WORKING_SET_NAME,
+                Win32.Tokens.SE_TCB_NAME,
+                Win32.Tokens.SE_CREATE_PAGEFILE_NAME,
+                Win32.Tokens.SE_LOCK_MEMORY_NAME,
+                Win32.Tokens.SE_CREATE_TOKEN_NAME
             };
             var authId = Win32.Tokens.SYSTEM_LUID;
-            
+
             GetUserToken(false);
 
             Win32.Tokens.DuplicateTokenEx(userToken,
                 Win32.Tokens.TokenAccessFlags.TOKEN_ALL_ACCESS, IntPtr.Zero,
                 Win32.Tokens.SECURITY_IMPERSONATION_LEVEL.SecurityIdentification, Win32.Tokens.TOKEN_TYPE.TokenPrimary,
                 out Win32.TokensEx.SafeTokenHandle dupedUserToken);
- 
+
             Win32.SID.AllocateAndInitializeSid(
                 ref Win32.SID.SECURITY_MANDATORY_LABEL_AUTHORITY,
                 1,
-                (int)Win32.SID.SECURITY_MANDATORY_LABEL.High,
+                trustedInstaller ? (int)Win32.SID.SECURITY_MANDATORY_LABEL.System : (int)Win32.SID.SECURITY_MANDATORY_LABEL.High,
                 0,
                 0,
                 0,
@@ -233,47 +288,48 @@ namespace TrustedUninstaller.Shared
                 0,
                 0,
                 0,
-                out IntPtr integritySid);
-            
-            var tokenMandatoryLabel = new Win32.Tokens.TOKEN_MANDATORY_LABEL() {
-                Label = default(Win32.SID.SID_AND_ATTRIBUTES)
-            };
+                out Win32.SID.SafeSIDHandle integritySid);
 
-            tokenMandatoryLabel.Label.Attributes = (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_INTEGRITY;
-            tokenMandatoryLabel.Label.Sid        = integritySid;
+            using (integritySid)
+            {
+                var tokenMandatoryLabel = new Win32.Tokens.TOKEN_MANDATORY_LABEL()
+                {
+                    Label = default(Win32.SID.SID_AND_ATTRIBUTES)
+                };
 
-            var integritySize = Marshal.SizeOf(tokenMandatoryLabel);
-            var tokenInfo = Marshal.AllocHGlobal(integritySize);
+                tokenMandatoryLabel.Label.Attributes = (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_INTEGRITY;
+                tokenMandatoryLabel.Label.Sid = integritySid.DangerousGetHandle();
 
-            Marshal.StructureToPtr(tokenMandatoryLabel, tokenInfo, false);
-            
-            Win32.Tokens.SetTokenInformation(
-                dupedUserToken,
-                Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenIntegrityLevel,
-                tokenInfo,
-                integritySize + Win32.SID.GetLengthSid(integritySid));
-            
-            
-            var pTokenUser = Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenUser);
+                var integritySize = Marshal.SizeOf(tokenMandatoryLabel);
+                var tokenInfo = Marshal.AllocHGlobal(integritySize);
+
+                Marshal.StructureToPtr(tokenMandatoryLabel, tokenInfo, false);
+
+                Win32.Tokens.SetTokenInformation(
+                    dupedUserToken,
+                    Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenIntegrityLevel,
+                    tokenInfo,
+                    integritySize + Win32.SID.GetLengthSid(integritySid));
+            }
+
+            var pTokenUser = Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenUser, Marshal.SizeOf<Win32.Tokens.TOKEN_USER>());
             var pTokenOwner =
-                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenOwner);
+                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenOwner, Marshal.SizeOf<Win32.Tokens.TOKEN_OWNER>());
             var pTokenPrivileges =
-                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenPrivileges);
+                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenPrivileges, Marshal.SizeOf<Win32.Tokens.TOKEN_PRIVILEGES>());
             var pTokenGroups =
-                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenGroups);
+                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenGroups, Marshal.SizeOf<Win32.Tokens.TOKEN_GROUPS>());
             var pTokenPrimaryGroup =
-                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenPrimaryGroup);
+                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenPrimaryGroup, Marshal.SizeOf<Win32.Tokens.TOKEN_PRIMARY_GROUP>());
             var pTokenDefaultDacl =
-                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenDefaultDacl);
+                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenDefaultDacl, Marshal.SizeOf<Win32.Tokens.TOKEN_DEFAULT_DACL>());
             var pTokenSource =
-                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenSource);
-            
+                Win32.TokensEx.GetInfoFromToken(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenSource, Marshal.SizeOf<Win32.Tokens.TOKEN_SOURCE>());
+
             var tokenUser =
                 (Win32.Tokens.TOKEN_USER)Marshal.PtrToStructure(pTokenUser, typeof(Win32.Tokens.TOKEN_USER));
-            if (!Win32.TokensEx.CreateTokenPrivileges(privileges, out var tokenPrivileges))
-                tokenPrivileges =
-                    (Win32.Tokens.TOKEN_PRIVILEGES)Marshal.PtrToStructure(pTokenPrivileges,
-                        typeof(Win32.Tokens.TOKEN_PRIVILEGES));
+
+            var tokenPrivileges = trustedInstaller ? Win32.TokensEx.CreateTokenPrivileges(privileges) : Win32.TokensEx.CreateDefaultAdministratorTokenPrivileges();
             var tokenGroups = (Win32.Tokens.TOKEN_GROUPS)Marshal.PtrToStructure(
                 pTokenGroups, typeof(Win32.Tokens.TOKEN_GROUPS));
             var tokenOwner =
@@ -285,6 +341,7 @@ namespace TrustedUninstaller.Shared
                 pTokenDefaultDacl, typeof(Win32.Tokens.TOKEN_DEFAULT_DACL));
             var tokenSource = (Win32.Tokens.TOKEN_SOURCE)Marshal.PtrToStructure(
                 pTokenSource, typeof(Win32.Tokens.TOKEN_SOURCE));
+
             /*
             for (var idx = 0; idx < tokenPrivileges.PrivilegeCount - 1; idx++)
             {
@@ -299,9 +356,11 @@ namespace TrustedUninstaller.Shared
                 }
             }
             */
-            
-            IntPtr adminsSid = IntPtr.Zero;
-            IntPtr localAndAdminSid = IntPtr.Zero;
+
+            Win32.SID.SafeSIDHandle adminsSid = null;
+            Win32.SID.SafeSIDHandle localAndAdminSid = null;
+            Win32.SID.SafeSIDHandle trustedInstallerSid = null;
+            Win32.SID.SafeSIDHandle ntServiceSid = null;
 
             bool adminsFound = false;
             bool localAndAdminFound = false;
@@ -315,7 +374,8 @@ namespace TrustedUninstaller.Shared
                     tokenGroups.Groups[idx].Attributes = (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED |
                                                          (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES
                                                              .SE_GROUP_ENABLED_BY_DEFAULT | (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_MANDATORY | (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_OWNER;
-                } else if (string.Compare(strSid, Win32.SID.DOMAIN_ALIAS_RID_LOCAL_AND_ADMIN_GROUP, StringComparison.OrdinalIgnoreCase) == 0)
+                }
+                else if (string.Compare(strSid, Win32.SID.DOMAIN_ALIAS_RID_LOCAL_AND_ADMIN_GROUP, StringComparison.OrdinalIgnoreCase) == 0)
                 {
                     localAndAdminFound = true;
                     tokenGroups.Groups[idx].Attributes = (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED |
@@ -323,11 +383,11 @@ namespace TrustedUninstaller.Shared
                                                              .SE_GROUP_ENABLED_BY_DEFAULT | (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_MANDATORY;
                 }
             }
-            
+
             if (!adminsFound)
             {
                 Win32.SID.ConvertStringSidToSid(Win32.SID.DOMAIN_ALIAS_RID_ADMINS, out adminsSid);
-                tokenGroups.Groups[tokenGroups.GroupCount].Sid = adminsSid;
+                tokenGroups.Groups[tokenGroups.GroupCount].Sid = adminsSid.DangerousGetHandle();
                 tokenGroups.Groups[tokenGroups.GroupCount].Attributes =
                     (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED |
                     (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT;
@@ -336,13 +396,30 @@ namespace TrustedUninstaller.Shared
             if (!localAndAdminFound)
             {
                 Win32.SID.ConvertStringSidToSid(Win32.SID.DOMAIN_ALIAS_RID_LOCAL_AND_ADMIN_GROUP, out localAndAdminSid);
-                tokenGroups.Groups[tokenGroups.GroupCount].Sid = localAndAdminSid;
+                tokenGroups.Groups[tokenGroups.GroupCount].Sid = localAndAdminSid.DangerousGetHandle();
                 tokenGroups.Groups[tokenGroups.GroupCount].Attributes =
                     (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED |
                     (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT;
                 tokenGroups.GroupCount++;
             }
-            
+
+            if (trustedInstaller)
+            {
+                Win32.SID.ConvertStringSidToSid(Win32.SID.TRUSTED_INSTALLER_RID, out trustedInstallerSid);
+                tokenGroups.Groups[tokenGroups.GroupCount].Sid = trustedInstallerSid.DangerousGetHandle();
+                tokenGroups.Groups[tokenGroups.GroupCount].Attributes =
+                    (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED |
+                    (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT;
+                tokenGroups.GroupCount++;
+
+                Win32.SID.ConvertStringSidToSid(Win32.SID.NT_SERVICE_SID, out ntServiceSid);
+                tokenGroups.Groups[tokenGroups.GroupCount].Sid = ntServiceSid.DangerousGetHandle();
+                tokenGroups.Groups[tokenGroups.GroupCount].Attributes =
+                    (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED |
+                    (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT;
+                tokenGroups.GroupCount++;
+            }
+
             var expirationTime = new Win32.LARGE_INTEGER() { QuadPart = -1L };
             var sqos = new Win32.Tokens.SECURITY_QUALITY_OF_SERVICE(
                 Win32.Tokens.SECURITY_IMPERSONATION_LEVEL.SecurityIdentification, Win32.Tokens.SECURITY_STATIC_TRACKING,
@@ -351,12 +428,17 @@ namespace TrustedUninstaller.Shared
             var pSqos = Marshal.AllocHGlobal(Marshal.SizeOf(sqos));
             Marshal.StructureToPtr(sqos, pSqos, true);
             oa.SecurityQualityOfService = pSqos;
-            
-            var status = Win32.Tokens.ZwCreateToken(out elevatedUserToken,
-                Win32.Tokens.TokenAccessFlags.TOKEN_ALL_ACCESS, ref oa,  Win32.Tokens.TOKEN_TYPE.TokenPrimary,
-                ref authId, ref expirationTime, ref tokenUser, ref tokenGroups, ref tokenPrivileges, ref tokenOwner,
-                ref tokenPrimaryGroup, ref tokenDefaultDacl, ref tokenSource);
-            
+
+            var status = trustedInstaller
+                ? Win32.Tokens.ZwCreateToken(out trustedInstallerUserToken,
+                    Win32.Tokens.TokenAccessFlags.TOKEN_ALL_ACCESS, ref oa, Win32.Tokens.TOKEN_TYPE.TokenPrimary,
+                    ref authId, ref expirationTime, ref tokenUser, ref tokenGroups, ref tokenPrivileges, ref tokenOwner,
+                    ref tokenPrimaryGroup, ref tokenDefaultDacl, ref tokenSource)
+                : Win32.Tokens.ZwCreateToken(out elevatedUserToken,
+                    Win32.Tokens.TokenAccessFlags.TOKEN_ALL_ACCESS, ref oa, Win32.Tokens.TOKEN_TYPE.TokenPrimary,
+                    ref authId, ref expirationTime, ref tokenUser, ref tokenGroups, ref tokenPrivileges, ref tokenOwner,
+                    ref tokenPrimaryGroup, ref tokenDefaultDacl, ref tokenSource);
+
             Win32.LocalFree(pTokenUser);
             Win32.LocalFree(pTokenOwner);
             Win32.LocalFree(pTokenGroups);
@@ -364,31 +446,44 @@ namespace TrustedUninstaller.Shared
             Win32.LocalFree(pTokenPrivileges);
             Win32.LocalFree(pTokenPrimaryGroup);
 
-            if (adminsSid != IntPtr.Zero)
-                Win32.SID.FreeSid(adminsSid);
-            if (localAndAdminSid != IntPtr.Zero)
-                Win32.SID.FreeSid(localAndAdminSid);
-            if (integritySid != IntPtr.Zero)
-                Win32.SID.FreeSid(integritySid);
-            
+            adminsSid?.Dispose();
+            localAndAdminSid?.Dispose();
+            trustedInstallerSid?.Dispose();
+            ntServiceSid?.Dispose();
+
             if (status != 0)
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Error creating elevated user token: " + status);
+                throw new Win32Exception($"Error creating {(trustedInstaller ? "trusted installer" : "elevated")} user token: " + status);
+
+            Win32.Tokens.GetTokenInformation(dupedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenSessionId, out int sessionId, sizeof(int), out _);
+            if (!Win32.Tokens.SetTokenInformation(trustedInstaller ? trustedInstallerUserToken : elevatedUserToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenSessionId, ref sessionId, sizeof(int)))
+            {
+                if (trustedInstaller)
+                {
+                    trustedInstallerUserToken.Dispose();
+                    trustedInstallerUserToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
+                }
+                else
+                {
+                    elevatedUserToken.Dispose();
+                    elevatedUserToken = new Win32.TokensEx.SafeTokenHandle(IntPtr.Zero);
+                }
+                throw new Win32Exception("Error setting token session id: " + Marshal.GetLastWin32Error());
+            }
         }
 
         public static void GetSystemToken()
         {
-            if (systemToken.DangerousGetHandle() != IntPtr.Zero)
+            if (!systemToken.IsInvalid)
                 return;
-            
+
             try
             {
-                var processHandle = Win32.Process.OpenProcess(Win32.Process.ProcessAccessFlags.QueryLimitedInformation, false, Process.GetProcessesByName("winlogon").First().Id);
+                using var processHandle = Win32.Process.OpenProcess(Win32.Process.ProcessAccessFlags.QueryLimitedInformation, false, Process.GetProcessesByName("winlogon").First().Id);
                 if (!Win32.Tokens.OpenProcessToken(processHandle,
                         Win32.Tokens.TokenAccessFlags.TOKEN_DUPLICATE | Win32.Tokens.TokenAccessFlags.TOKEN_ASSIGN_PRIMARY |
                         Win32.Tokens.TokenAccessFlags.TOKEN_QUERY | Win32.Tokens.TokenAccessFlags.TOKEN_IMPERSONATE,
                         out var tokenHandle))
                 {
-                    Win32.CloseHandle(processHandle);
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to open process token for winlogon.");
                 }
 
@@ -396,12 +491,18 @@ namespace TrustedUninstaller.Shared
                         Win32.Tokens.SECURITY_IMPERSONATION_LEVEL.SecurityIdentification,
                         Win32.Tokens.TOKEN_TYPE.TokenPrimary, out systemToken))
                 {
-                    Win32.CloseHandle(processHandle);
                     throw new Win32Exception(Marshal.GetLastWin32Error(),
                         "Failed to duplicate process token for winlogon.");
                 }
 
-                Win32.CloseHandle(processHandle);
+                using var currentProcess = Process.GetCurrentProcess();
+                Win32.Tokens.OpenProcessToken(new SafeProcessHandle(currentProcess.Handle, false), Win32.Tokens.TokenAccessFlags.TOKEN_ALL_ACCESS, out Win32.TokensEx.SafeTokenHandle currentHandle);
+                Win32.Tokens.GetTokenInformation(currentHandle, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenSessionId, out int sessionId, sizeof(int), out _);
+                if (!Win32.Tokens.SetTokenInformation(systemToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenSessionId, ref sessionId, sizeof(int)))
+                {
+                    systemToken = null;
+                    throw new Win32Exception("Error setting token session id: " + Marshal.GetLastWin32Error());
+                }
             }
             catch (Exception e)
             {
@@ -442,20 +543,20 @@ namespace TrustedUninstaller.Shared
                     Win32.WTS.WTSFreeMemory(pMemory);
                 }
 
-                IntPtr systemProcessHandle = IntPtr.Zero;
+                SafeProcessHandle systemProcessHandle;
                 try
                 {
-                    systemProcessHandle = Process.GetProcessById(dwLsassPID).Handle;
+                    systemProcessHandle = new SafeProcessHandle(Process.GetProcessById(dwLsassPID).Handle, false);
                 }
                 catch
                 {
-                    systemProcessHandle = Process.GetProcessById(dwWinLogonPID).Handle;
+                    systemProcessHandle = new SafeProcessHandle(Process.GetProcessById(dwWinLogonPID).Handle, false);
                 }
 
                 if (!Win32.Tokens.OpenProcessToken(systemProcessHandle, Win32.Tokens.TokenAccessFlags.TOKEN_DUPLICATE,
                         out Win32.TokensEx.SafeTokenHandle token))
                 {
-                    Win32.CloseHandle(systemProcessHandle);
+                    systemProcessHandle.Dispose();
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to open process token.");
                 }
 
@@ -463,14 +564,12 @@ namespace TrustedUninstaller.Shared
                         Win32.Tokens.SECURITY_IMPERSONATION_LEVEL.SecurityIdentification,
                         Win32.Tokens.TOKEN_TYPE.TokenPrimary, out systemToken))
                 {
-                    Win32.CloseHandle(systemProcessHandle);
+                    systemProcessHandle.Dispose();
                     throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to duplicate process token.");
                 }
-
-                Win32.CloseHandle(systemProcessHandle);
             }
         }
-        
+
         public static Win32.TokensEx.SafeTokenHandle GetCurrentProcessToken()
         {
             if (!Win32.Tokens.OpenProcessToken(Win32.Process.GetCurrentProcess(),
@@ -481,13 +580,12 @@ namespace TrustedUninstaller.Shared
 
         private static Win32.TokensEx.SafeTokenHandle GetProcessTokenByName(string name, bool impersonation)
         {
-            var processHandle = Process.GetProcessesByName(name).First().Handle;
+            var processHandle = new SafeProcessHandle(Process.GetProcessesByName(name).First().Handle, false);
             if (!Win32.Tokens.OpenProcessToken(processHandle,
                     Win32.Tokens.TokenAccessFlags.TOKEN_DUPLICATE | Win32.Tokens.TokenAccessFlags.TOKEN_ASSIGN_PRIMARY |
                     Win32.Tokens.TokenAccessFlags.TOKEN_QUERY | Win32.Tokens.TokenAccessFlags.TOKEN_IMPERSONATE,
                     out var tokenHandle))
             {
-                Win32.CloseHandle(processHandle);
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "Failed to open process token for " + name + ".");
             }
 
@@ -495,12 +593,10 @@ namespace TrustedUninstaller.Shared
                     impersonation ? Win32.Tokens.SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation : Win32.Tokens.SECURITY_IMPERSONATION_LEVEL.SecurityIdentification,
                     impersonation ? Win32.Tokens.TOKEN_TYPE.TokenImpersonation : Win32.Tokens.TOKEN_TYPE.TokenPrimary, out Win32.TokensEx.SafeTokenHandle handle))
             {
-                Win32.CloseHandle(processHandle);
                 throw new Win32Exception(Marshal.GetLastWin32Error(),
                     "Failed to duplicate process token for " + name + ".");
             }
-
-            Win32.CloseHandle(processHandle);
             return handle;
-        }    }
+        }
+    }
 }

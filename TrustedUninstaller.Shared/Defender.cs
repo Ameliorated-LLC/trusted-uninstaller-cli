@@ -1,17 +1,23 @@
 ﻿using System.IO;
 using System.Windows;
-using TrustedUninstaller.Shared.Actions;
-using TrustedUninstaller.Shared.Tasks;
+using Core.Actions;
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
+using System.Configuration.Install;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.ServiceProcess;
 using System.Text;
 using System.Threading;
+using Core;
+using Interprocess;
+using JetBrains.Annotations;
 using Microsoft.Win32;
+using Microsoft.Win32.SafeHandles;
 
 namespace TrustedUninstaller.Shared
 {
@@ -65,12 +71,41 @@ namespace TrustedUninstaller.Shared
                 try
                 {
                     File.Move(file, reset ? file.Substring(0, file.Length - 4) : file + ".oldx");
+                    Log.EnqueueSafe(LogType.Info, "PASS: " + file, new SerializableTrace());
                 }
                 catch (Exception e)
                 {
+                    Log.EnqueueExceptionSafe(e, file);
                 }
             }
         }
+        
+        [InterprocessMethod(Level.Administrator)]
+        private static bool DisableDefenderPrivileged()
+        {
+            try
+            {
+                Defender.Disable();
+            }
+            catch (Exception ex)
+            {
+                Log.WriteExceptionSafe(ex, $"First Defender disable failed from second process.");
+
+                Defender.Kill();
+                try
+                {
+                    Defender.Disable();
+                }
+                catch (Exception e)
+                {
+                    Log.WriteExceptionSafe(e, $"Could not disable Windows Defender from second process.");
+                    throw;
+                }
+            }
+            return true;
+        }
+        
+        [InterprocessMethod(Level.Administrator)]
         public static void Cripple()
         {
             foreach (var defenderDir in defenderDirs)
@@ -81,14 +116,17 @@ namespace TrustedUninstaller.Shared
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog("Error renaming files: " + e.GetType() + " " + e.Message, null, "Defender cripple warning", defenderDir);
+                    Log.WriteExceptionSafe(e, "Error renaming files in Defender directory.", ("Directory", defenderDir));
                 }
             }
         }
 
-
+        [InterprocessMethod(Level.Administrator)]
         public static void DeCripple()
         {
+            if (!DisableDefenderPrivileged())
+                Log.EnqueueSafe(LogType.Error, "Defender disable after restart failed.", new SerializableTrace());
+            
             foreach (var defenderDir in defenderDirs)
             {
                 try
@@ -101,29 +139,411 @@ namespace TrustedUninstaller.Shared
             }
         }
         
+        [InterprocessMethod(Level.Administrator)]
+        public static void DisableBlocklist()
+        {
+            try
+            {
+                // Can cause ProcessHacker driver warnings without this
+                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.RunTask();
+
+                if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.GetStatus()
+                    != UninstallTaskStatus.Completed)
+                    throw new Exception("Unknown error");
+            }
+            catch (Exception e)
+            {
+                Log.EnqueueExceptionSafe(e, "First memory integrity disable failed.");
+
+                new RunAction()
+                {
+                    RawPath = Directory.GetCurrentDirectory(),
+                    Exe = $"NSudoLC.exe",
+                    Arguments =
+                        @"-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add ""HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"" /v Enabled /d 0 /f",
+                    CreateWindow = false
+                }.RunTask();
+
+                if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.GetStatus()
+                    != UninstallTaskStatus.Completed)
+                    Log.EnqueueSafe(LogType.Warning, "Could not disable memory integrity.", new SerializableTrace());
+            }
+            try
+            {
+                // Can cause ProcessHacker driver warnings without this
+                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.RunTask();
+
+                if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.GetStatus()
+                    != UninstallTaskStatus.Completed)
+                    throw new Exception("Unknown error");
+            }
+            catch (Exception e)
+            {
+                Log.EnqueueExceptionSafe(e, "First blocklist disable failed.");
+
+                new RunAction()
+                {
+                    RawPath = Directory.GetCurrentDirectory(),
+                    Exe = $"NSudoLC.exe",
+                    Arguments =
+                        @"-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add ""HKLM\SYSTEM\CurrentControlSet\Control\CI\Config"" /v VulnerableDriverBlocklistEnable /d 0 /f",
+                    CreateWindow = false
+                }.RunTask();
+
+                if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.GetStatus()
+                    != UninstallTaskStatus.Completed)
+                    Log.EnqueueSafe(LogType.Warning, "Could not disable blocklist.", new SerializableTrace());
+            }
+        }
+
+        [InterprocessMethod(Level.Administrator)]
+        public static bool KillAndDisable(InterLink.InterProgress progress, InterLink.InterMessageReporter reporter, bool forceSafeBoot, bool noSafeBoot)
+        {
+            try
+            {
+                if (!forceSafeBoot)
+                {
+                    Thread.Sleep(250);
+                    reporter.Report("Extracting service package...");
+                    string cabPath = null;
+
+                    cabPath = ExtractCab();
+                    progress.Report(2);
+
+                    reporter.Report("Adding certificate...");
+                    var certPath = Path.GetTempFileName();
+
+                    int exitCode;
+                    exitCode = RunPSCommand(
+                        $"try {{" +
+                        $"$cert = (Get-AuthenticodeSignature '{cabPath}').SignerCertificate; " +
+                        $"[System.IO.File]::WriteAllBytes('{certPath}', $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert)); " +
+                        $"Import-Certificate '{certPath}' -CertStoreLocation 'Cert:\\LocalMachine\\Root' | Out-Null; " +
+                        $"Copy-Item -Path \"HKLM:\\Software\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\$($cert.Thumbprint)\" \"HKLM:\\Software\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\8A334AA8052DD244A647306A76B8178FA215F344\" -Force | Out-Null; " +
+                        $"EXIT 0; " +
+                        $"}} catch {{EXIT 1}}", null, null);
+
+                    Thread.Sleep(250);
+
+                    if (exitCode == 1)
+                        throw new Exception("Could not add certificate.");
+
+                    progress.Report(10);
+
+                    reporter.Report("Applying service package...");
+                    string err = null;
+
+                    decimal lastProgress = 10;
+                    double lastDismProgress = 0;
+                    exitCode = RunCommand("DISM.exe",
+                        $"/Online /Add-Package /PackagePath:\"{cabPath}\" /NoRestart /IgnoreCheck",
+                        (sender, args) =>
+                        {
+                            if (args.Data != null && args.Data.Contains("%"))
+                            {
+                                int i = args.Data.IndexOf('%') - 1;
+                                while (args.Data[i] == '.' || Char.IsDigit(args.Data[i])) i--;
+                                if (double.TryParse(args.Data.Substring(i + 1, args.Data.IndexOf('%') - i - 1), out double dismProgress))
+                                {
+                                    if (lastDismProgress == dismProgress)
+                                        return;
+                                    lastProgress = (decimal)((dismProgress / 100) * 80) + 10;
+                                    progress.Report(lastProgress);
+                                    lastDismProgress = dismProgress;
+                                }
+                            }
+                        },
+                        ((sender, args) =>
+                        {
+                            if (err == null && args.Data != null)
+                                err = args.Data;
+                            else if (err != null && args.Data != null)
+                                err = err + Environment.NewLine + args.Data;
+                        }));
+
+                    if (exitCode != 0 && exitCode != 3010)
+                    {
+                        if (noSafeBoot)
+                        {
+                            Console.WriteLine("\r\nDefender removal package application failed. Please restart and try again.");
+                            Environment.Exit(1);
+                            return false;
+                        }
+                        
+                        Log.EnqueueSafe(LogType.Info, "Live dism application failed: " + err, new SerializableTrace(), ("Exit code", exitCode));
+
+                        reporter.Report("Removing certificate...");
+                        exitCode = RunPSCommand(
+                            $"$cert = (Get-AuthenticodeSignature '{cabPath}').SignerCertificate; " +
+                            $"Get-ChildItem 'Cert:\\LocalMachine\\Root\\$($cert.Thumbprint)' | Remove-Item -Force | Out-Null; " +
+                            $"Remove-Item \"HKLM:\\Software\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\8A334AA8052DD244A647306A76B8178FA215F344\" -Force -Recurse | Out-Null"
+                            , null, null);
+
+                        progress.Report(lastProgress + 5);
+
+                        reporter.Report("Adding service...");
+                        InstallService();
+                        Thread.Sleep(2000);
+
+                        progress.Report(95);
+
+                        reporter.Report("Enabling SafeBoot...");
+                        RunCommand("bcdedit.exe", "/set {current} safeboot minimal", null, null);
+                        Thread.Sleep(500);
+
+                        progress.Report(100);
+
+                        return false;
+                    }
+
+                    progress.Report(90);
+
+                    reporter.Report("Removing certificate...");
+                    exitCode = RunPSCommand(
+                        $"$cert = (Get-AuthenticodeSignature '{cabPath}').SignerCertificate; " +
+                        $"Get-ChildItem 'Cert:\\LocalMachine\\Root\\$($cert.Thumbprint)' | Remove-Item -Force | Out-Null; " +
+                        $"Remove-Item \"HKLM:\\Software\\Microsoft\\SystemCertificates\\ROOT\\Certificates\\8A334AA8052DD244A647306A76B8178FA215F344\" -Force -Recurse | Out-Null"
+                        , null, null);
+                    
+                    try { File.Delete(cabPath); }
+                    catch
+                    {
+                    }
+
+                    progress.Report(100);
+
+                    return true;
+                }
+                else
+                {
+                    Thread.Sleep(250);
+                    progress.Report(2);
+
+                    reporter.Report("Adding service...");
+                    Thread.Sleep(500);
+                    progress.Report(10);
+                    InstallService();
+                    Thread.Sleep(1000);
+                    progress.Report(25);
+                    Thread.Sleep(1200);
+                    progress.Report(50);
+                    Thread.Sleep(1300);
+                    progress.Report(70);
+
+                    reporter.Report("Enabling SafeBoot...");
+                    RunCommand("bcdedit.exe", "/set {current} safeboot minimal", null, null);
+                    Thread.Sleep(2000);
+
+                    progress.Report(100);
+
+                    return false;
+                }
+            }
+            catch (Exception e)
+            {
+                Log.EnqueueExceptionSafe(e);
+                throw;
+            }
+        }
+
+        private static void InstallService()
+        {
+            bool displayLastUsername = EnableDontDisplayLastUsername();
+            
+            IntPtr scm = Win32.Service.OpenSCManager(null, null, Win32.Service.SCM_ACCESS.SC_MANAGER_CREATE_SERVICE);
+            if (scm == IntPtr.Zero)
+                throw new ApplicationException("Could not connect to service control manager.");
+
+            try
+            {
+                IntPtr service = Win32.Service.OpenService(scm, "AMEPrepare", Win32.Service.SERVICE_ACCESS.SERVICE_DELETE);
+                if (service != IntPtr.Zero)
+                    UninstallService(service);
+                    
+                service = Win32.Service.CreateService(scm, "AMEPrepare", "AME Prepare", Win32.Service.ServiceAccessRights.AllAccess, Win32.Service.SERVICE_WIN32_OWN_PROCESS, Win32.Service.ServiceBootFlag.AutoStart, Win32.Service.ServiceError.Normal, 
+                    $"\"{Win32.ProcessEx.GetCurrentProcessFileLocation()}\" -Service {displayLastUsername}", null, IntPtr.Zero, null, null, null);
+
+                if (service == IntPtr.Zero)
+                    throw new ApplicationException("Failed to install service.");
+                
+                AllowServiceSafeBoot();
+
+                Win32.Service.CloseServiceHandle(service);
+            }
+            finally
+            {
+                Win32.Service.CloseServiceHandle(scm);
+            }
+        }
+        
+        private static bool EnableDontDisplayLastUsername()
+        {
+            var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", true);
+            if (key != null)
+            {
+                var value = key.GetValue("dontdisplaylastusername");
+        
+                if (value is int intValue && intValue == 1)
+                {
+                    return true;
+                }
+        
+                key.SetValue("dontdisplaylastusername", 1, RegistryValueKind.DWord);
+            }
+
+            return false;
+        }
+        private static void AllowServiceSafeBoot()
+        {
+            var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal", true);
+            if (key != null)
+            {
+                var subKey = key.CreateSubKey("AMEPrepare");
+                subKey?.SetValue("", "Service", RegistryValueKind.String);
+            }
+        }
+        
+        public static void UninstallService(IntPtr service)
+        {
+            Win32.Service.SERVICE_STATUS status = new Win32.Service.SERVICE_STATUS();
+            Win32.Service.ControlService(service, Win32.Service.ServiceControl.Stop, status);
+            var changedStatus = WaitForServiceStatus(service, Win32.Service.ServiceState.StopPending, Win32.Service.ServiceState.Stopped);
+            if (!changedStatus)
+                throw new ApplicationException("Unable to stop service");
+
+            if (!Win32.Service.DeleteService(service))
+                throw new ApplicationException("Could not delete service " + Marshal.GetLastWin32Error());
+            else
+                Win32.Service.CloseServiceHandle(service);
+        }
+        
+        private static bool WaitForServiceStatus(IntPtr service, Win32.Service.ServiceState waitStatus, Win32.Service.ServiceState desiredStatus)
+        {
+            Win32.Service.SERVICE_STATUS status = new Win32.Service.SERVICE_STATUS();
+
+            Win32.Service.QueryServiceStatus(service, status);
+            if (status.dwCurrentState == desiredStatus) return true;
+
+            int dwStartTickCount = Environment.TickCount;
+            int dwOldCheckPoint = status.dwCheckPoint;
+
+            while (status.dwCurrentState == waitStatus)
+            {
+                // Do not wait longer than the wait hint. A good interval is
+                // one tenth the wait hint, but no less than 1 second and no
+                // more than 10 seconds.
+
+                int dwWaitTime = status.dwWaitHint / 10;
+
+                if (dwWaitTime < 1000) dwWaitTime = 1000;
+                else if (dwWaitTime > 10000) dwWaitTime = 10000;
+
+                Thread.Sleep(dwWaitTime);
+
+                // Check the status again.
+
+                if (Win32.Service.QueryServiceStatus(service, status) == 0) break;
+
+                if (status.dwCheckPoint > dwOldCheckPoint)
+                {
+                    // The service is making progress.
+                    dwStartTickCount = Environment.TickCount;
+                    dwOldCheckPoint = status.dwCheckPoint;
+                }
+                else
+                {
+                    if (Environment.TickCount - dwStartTickCount > status.dwWaitHint)
+                    {
+                        // No progress made within the wait hint
+                        break;
+                    }
+                }
+            }
+            return (status.dwCurrentState == desiredStatus || status.dwCurrentState == Win32.Service.ServiceState.NotFound);
+        }
+
+        private static int RunPSCommand(string command, [CanBeNull] DataReceivedEventHandler outputHandler, [CanBeNull] DataReceivedEventHandler errorHandler) =>
+            RunCommand("powershell.exe", $"-NoP -C \"{command}\"", outputHandler, errorHandler);
+        private static int RunCommand(string exe, string arguments, [CanBeNull] DataReceivedEventHandler outputHandler, [CanBeNull] DataReceivedEventHandler errorHandler)
+        {
+            var process = new Process
+            {
+                StartInfo = new ProcessStartInfo()
+                {
+                    FileName = exe,
+                    Arguments = arguments,
+
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = outputHandler != null,
+                    RedirectStandardError = errorHandler != null
+                }
+            };
+
+            if (outputHandler != null)
+                process.OutputDataReceived += outputHandler;
+            if (errorHandler != null)
+                process.ErrorDataReceived += errorHandler;
+
+            process.Start();
+            
+            if (outputHandler != null)
+                process.BeginOutputReadLine();
+            if (errorHandler != null)
+                process.BeginErrorReadLine();
+
+            process.WaitForExit();
+            return process.ExitCode;
+        }
+
+        private static string ExtractCab()
+        {
+            var cabArch = Win32.SystemInfoEx.SystemArchitecture == Architecture.Arm || Win32.SystemInfoEx.SystemArchitecture == Architecture.Arm64 ? "arm64" : "amd64";
+            
+            var fileDir = Environment.ExpandEnvironmentVariables("%ProgramData%\\AME");
+            if (!Directory.Exists(fileDir)) Directory.CreateDirectory(fileDir);
+
+            var destination = Path.Combine(fileDir, $"Z-AME-NoDefender-Package31bf3856ad364e35{cabArch}1.0.0.0.cab");
+            
+            if (File.Exists(destination))
+            {
+                return destination;
+            }
+            
+            Assembly assembly = Assembly.GetEntryAssembly();
+            using (UnmanagedMemoryStream stream = (UnmanagedMemoryStream)assembly!.GetManifestResourceStream($"TrustedUninstaller.CLI.Properties.Z-AME-NoDefender-Package31bf3856ad364e35{cabArch}1.0.0.0.cab"))
+            {
+                byte[] buffer = new byte[stream!.Length];
+                stream.Read(buffer, 0, buffer.Length);
+                File.WriteAllBytes(destination, buffer);
+            }
+            return destination;
+        }
+        
+        [InterprocessMethod(Level.Administrator)]
         public static bool Disable()
         {
             bool restartRequired = true;
 
             foreach (var service in DefenderItems.Where(x => x.Value == ProcessType.Service || x.Value == ProcessType.Device).Select(x => x.Key))
             {
-                AmeliorationUtil.SafeRunAction(new RegistryValueAction()
-                    { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\" + service, Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD, Operation = RegistryValueOperation.Set }).Wait();
+                CoreActions.SafeRun(new RegistryValueAction()
+                    { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\" + service, Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD, Operation = RegistryValueOperation.Set });
             }
             
-            AmeliorationUtil.SafeRunAction(new RegistryValueAction()
-                { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\SecurityHealthService", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }).Wait();
-            AmeliorationUtil.SafeRunAction(new RegistryValueAction()
-                { KeyName = @"HKLM\SOFTWARE\Policies\Microsoft\Windows\System", Value = "EnableSmartScreen", Data = 0, Type = RegistryValueType.REG_DWORD }).Wait();
+            CoreActions.SafeRun(new RegistryValueAction()
+                { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\SecurityHealthService", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD });
+            CoreActions.SafeRun(new RegistryValueAction()
+                { KeyName = @"HKLM\SOFTWARE\Policies\Microsoft\Windows\System", Value = "EnableSmartScreen", Data = 0, Type = RegistryValueType.REG_DWORD });
 
             try
             {
-                new RegistryValueAction() { KeyName = "HKLM\\SOFTWARE\\Microsoft\\Windows Defender", Value = "ProductAppDataPath", Operation = RegistryValueOperation.Delete }.RunTask().Wait();
-                new RegistryValueAction() { KeyName = "HKLM\\SOFTWARE\\Microsoft\\Windows Defender", Value = "InstallLocation", Operation = RegistryValueOperation.Delete }.RunTask().Wait();
+                new RegistryValueAction() { KeyName = "HKLM\\SOFTWARE\\Microsoft\\Windows Defender", Value = "ProductAppDataPath", Operation = RegistryValueOperation.Delete }.RunTask();
+                new RegistryValueAction() { KeyName = "HKLM\\SOFTWARE\\Microsoft\\Windows Defender", Value = "InstallLocation", Operation = RegistryValueOperation.Delete }.RunTask();
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog("Error removing Defender install values: " + e.GetType() + " " + e.Message, null, "Defender disable warning");
+                Log.EnqueueExceptionSafe(e, "Error removing Defender install values.");
 
                 new RunAction()
                 {
@@ -132,7 +552,7 @@ namespace TrustedUninstaller.Shared
                     Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait cmd /c \"reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"ProductAppDataPath\" /f &" +
                         " reg delete \"HKLM\\SOFTWARE\\Microsoft\\Windows Defender\" /v \"InstallLocation\" /f\"",
                     CreateWindow = false
-                }.RunTaskOnMainThread();
+                }.RunTask();
 
                 if (new RegistryValueAction() { KeyName = "HKLM\\SOFTWARE\\Microsoft\\Windows Defender", Value = "InstallLocation", Operation = RegistryValueOperation.Delete }.GetStatus() !=
                     UninstallTaskStatus.Completed)
@@ -141,7 +561,7 @@ namespace TrustedUninstaller.Shared
 
             try
             {
-                new RegistryKeyAction() { KeyName = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend" }.RunTask().Wait();
+                new RegistryKeyAction() { KeyName = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend" }.RunTask();
 
                 if (new RegistryKeyAction() { KeyName = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend" }.GetStatus() !=
                     UninstallTaskStatus.Completed)
@@ -149,7 +569,8 @@ namespace TrustedUninstaller.Shared
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog("First WinDefend service removal failed: " + e.GetType() + " " + e.Message, null, "Defender disable warning");
+
+                Log.EnqueueExceptionSafe(e, "First WinDefend service removal failed.");
 
                 new RunAction()
                 {
@@ -157,17 +578,17 @@ namespace TrustedUninstaller.Shared
                     Exe = $"NSudoLC.exe",
                     Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg delete \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend\" /f",
                     CreateWindow = false
-                }.RunTaskOnMainThread();
+                }.RunTask();
 
                 if (new RegistryKeyAction() { KeyName = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend" }.GetStatus() !=
                     UninstallTaskStatus.Completed)
                 {
-                    ErrorLogger.WriteToErrorLog("WinDefend service removal failed." + e.GetType(), null, "Defender disable warning");
+                    Log.EnqueueSafe(LogType.Warning, "WinDefend service removal failed.", new SerializableTrace());
 
                     try
                     {
                         new RegistryValueAction()
-                            { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }.RunTask().Wait();
+                            { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }.RunTask();
 
                         if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }.GetStatus() !=
                             UninstallTaskStatus.Completed)
@@ -175,7 +596,7 @@ namespace TrustedUninstaller.Shared
                     }
                     catch (Exception ex)
                     {
-                        ErrorLogger.WriteToErrorLog("First WinDefend disable failed: " + e.GetType() + " " + e.Message, null, "Defender disable warning");
+                        Log.EnqueueExceptionSafe(e, "First WinDefend disable failed.");
 
                         new RunAction()
                         {
@@ -183,7 +604,7 @@ namespace TrustedUninstaller.Shared
                             Exe = $"NSudoLC.exe",
                             Arguments = "-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add \"HKLM\\SYSTEM\\CurrentControlSet\\Services\\WinDefend\" /v \"Start\" /t REG_DWORD /d 4 /f",
                             CreateWindow = false
-                        }.RunTaskOnMainThread();
+                        }.RunTask();
 
                         if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\WinDefend", Value = "Start", Data = 4, Type = RegistryValueType.REG_DWORD }.GetStatus() !=
                             UninstallTaskStatus.Completed)
@@ -195,7 +616,7 @@ namespace TrustedUninstaller.Shared
             try
             {
                 // MpOAV.dll is normally in use by a lot of processes. This prevents that.
-                new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32" }.RunTask().Wait();
+                new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32" }.RunTask();
 
                 if (new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32" }.GetStatus() !=
                     UninstallTaskStatus.Completed)
@@ -203,7 +624,7 @@ namespace TrustedUninstaller.Shared
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog("First MpOAV mapping removal failed: " + e.GetType() + " " + e.Message, null, "Defender disable warning");
+                Log.EnqueueExceptionSafe(e, "First MpOAV mapping removal failed.");
 
                 new RunAction()
                 {
@@ -211,23 +632,23 @@ namespace TrustedUninstaller.Shared
                     Exe = $"NSudoLC.exe",
                     Arguments = @"-U:T -P:E -M:S -Priority:RealTime -ShowWindowMode:Hide -Wait reg delete ""HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32"" /f",
                     CreateWindow = false
-                }.RunTaskOnMainThread();
+                }.RunTask();
 
                 if (new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{2781761E-28E0-4109-99FE-B9D127C57AFE}\InprocServer32" }.GetStatus() !=
                     UninstallTaskStatus.Completed)
-                    ErrorLogger.WriteToErrorLog("Could not remove MpOAV mapping.", null, "Defender disable warning");
+                    Log.EnqueueSafe(LogType.Warning, "Could not remove MpOAV mapping.", new SerializableTrace());
             }
 
             try
             {
                 // smartscreenps.dll is sometimes in use by a lot of processes. This prevents that.
-                new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{a463fcb9-6b1c-4e0d-a80b-a2ca7999e25d}\InprocServer32" }.RunTask().Wait();
+                new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{a463fcb9-6b1c-4e0d-a80b-a2ca7999e25d}\InprocServer32" }.RunTask();
 
                 // This may not be important.
-                new RegistryKeyAction() { KeyName = @"HKCR\WOW6432Node\CLSID\{a463fcb9-6b1c-4e0d-a80b-a2ca7999e25d}\InprocServer32" }.RunTask().Wait();
-                new RegistryKeyAction() { KeyName = @"HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Internal.Security.SmartScreen.AppReputationService" }.RunTask().Wait();
-                new RegistryKeyAction() { KeyName = @"HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Internal.Security.SmartScreen.EventLogger" }.RunTask().Wait();
-                new RegistryKeyAction() { KeyName = @"HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Internal.Security.SmartScreen.UriReputationService" }.RunTask().Wait();
+                new RegistryKeyAction() { KeyName = @"HKCR\WOW6432Node\CLSID\{a463fcb9-6b1c-4e0d-a80b-a2ca7999e25d}\InprocServer32" }.RunTask();
+                new RegistryKeyAction() { KeyName = @"HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Internal.Security.SmartScreen.AppReputationService" }.RunTask();
+                new RegistryKeyAction() { KeyName = @"HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Internal.Security.SmartScreen.EventLogger" }.RunTask();
+                new RegistryKeyAction() { KeyName = @"HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Internal.Security.SmartScreen.UriReputationService" }.RunTask();
 
                 if (new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{a463fcb9-6b1c-4e0d-a80b-a2ca7999e25d}\InprocServer32" }.GetStatus() !=
                     UninstallTaskStatus.Completed)
@@ -235,7 +656,7 @@ namespace TrustedUninstaller.Shared
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog("First smartscreenps mapping removal failed: " + e.GetType() + " " + e.Message, null, "Defender disable warning");
+                Log.EnqueueExceptionSafe(e, "First smartscreenps mapping removal failed.");
 
                 new RunAction()
                 {
@@ -247,18 +668,18 @@ namespace TrustedUninstaller.Shared
                         "reg delete \"HKLM\\SOFTWARE\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.Internal.Security.SmartScreen.EventLogger\" /f &" +
                         "reg delete \"HKLM\\SOFTWARE\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.Internal.Security.SmartScreen.UriReputationService\" /f\"",
                     CreateWindow = false
-                }.RunTaskOnMainThread();
+                }.RunTask();
 
                 if (new RegistryKeyAction() { KeyName = @"HKCR\CLSID\{a463fcb9-6b1c-4e0d-a80b-a2ca7999e25d}\InprocServer32" }.GetStatus() !=
                     UninstallTaskStatus.Completed)
-                    ErrorLogger.WriteToErrorLog("Could not remove smartscreenps mapping.", null, "Defender disable warning");
+                    Log.EnqueueSafe(LogType.Warning, "Could not remove smartscreenps mapping.", new SerializableTrace());
             }
 
 
             try
             {
                 // Can cause ProcessHacker driver warnings without this
-                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.RunTask().Wait();
+                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.RunTask();
 
                 if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.GetStatus()
                     != UninstallTaskStatus.Completed)
@@ -266,7 +687,7 @@ namespace TrustedUninstaller.Shared
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog("First memory integrity disable failed: " + e.GetType() + " " + e.Message, null, "Defender disable warning");
+                Log.EnqueueExceptionSafe(e, "First memory integrity disable failed.");
 
                 new RunAction()
                 {
@@ -275,17 +696,17 @@ namespace TrustedUninstaller.Shared
                     Arguments =
                         @"-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add ""HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"" /v Enabled /d 0 /f",
                     CreateWindow = false
-                }.RunTaskOnMainThread();
+                }.RunTask();
 
                 if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.GetStatus()
                     != UninstallTaskStatus.Completed)
-                    ErrorLogger.WriteToErrorLog("Could not disable memory integrity.", null, "Defender disable warning");
+                    Log.EnqueueSafe(LogType.Warning, "Could not disable memory integrity.", new SerializableTrace());
             }
             
             try
             {
                 // Can cause ProcessHacker driver warnings without this
-                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.RunTask().Wait();
+                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.RunTask();
 
                 if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.GetStatus()
                     != UninstallTaskStatus.Completed)
@@ -293,7 +714,7 @@ namespace TrustedUninstaller.Shared
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog("First memory integrity disable failed: " + e.GetType() + " " + e.Message, null, "Defender disable warning");
+                Log.EnqueueExceptionSafe(e, "First memory integrity disable failed.");
 
                 new RunAction()
                 {
@@ -302,17 +723,17 @@ namespace TrustedUninstaller.Shared
                     Arguments =
                         @"-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add ""HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity"" /v Enabled /d 0 /f",
                     CreateWindow = false
-                }.RunTaskOnMainThread();
+                }.RunTask();
 
                 if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity", Value = "Enabled", Data = 0, }.GetStatus()
                     != UninstallTaskStatus.Completed)
-                    ErrorLogger.WriteToErrorLog("Could not disable memory integrity.", null, "Defender disable warning");
+                    Log.EnqueueSafe(LogType.Warning, "Could not disable memory integrity.", new SerializableTrace());
             }
 
             try
             {
                 // Can cause ProcessHacker driver warnings without this
-                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.RunTask().Wait();
+                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.RunTask();
 
                 if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.GetStatus()
                     != UninstallTaskStatus.Completed)
@@ -320,7 +741,7 @@ namespace TrustedUninstaller.Shared
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog("First blocklist disable failed: " + e.GetType() + " " + e.Message, null, "Kernel driver preparation warning");
+                Log.EnqueueExceptionSafe(e, "First blocklist disable failed.");
 
                 new RunAction()
                 {
@@ -329,11 +750,11 @@ namespace TrustedUninstaller.Shared
                     Arguments =
                         @"-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add ""HKLM\SYSTEM\CurrentControlSet\Control\CI\Config"" /v VulnerableDriverBlocklistEnable /d 0 /f",
                     CreateWindow = false
-                }.RunTaskOnMainThread();
+                }.RunTask();
 
                 if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config", Value = "VulnerableDriverBlocklistEnable", Data = 0, }.GetStatus()
                     != UninstallTaskStatus.Completed)
-                    ErrorLogger.WriteToErrorLog("Could not disable blocklist.", null, "Kernel driver preparation error");
+                    Log.EnqueueSafe(LogType.Warning, "Could not disable blocklist.", new SerializableTrace());
             }
 
             return restartRequired;
@@ -341,65 +762,31 @@ namespace TrustedUninstaller.Shared
 
         public static void GetDefenderPrivileges()
         {
-            IntPtr impersonatedTokenHandle = IntPtr.Zero;
+            ImpersonateProcessByName("winlogon", out Win32.TokensEx.SafeTokenHandle impersonatedTokenHandle);
+            impersonatedTokenHandle.Dispose();
 
-            ImpersonateProcessByName("winlogon", ref impersonatedTokenHandle);
-
-            ImpersonateProcessByName("lsass", ref impersonatedTokenHandle);
+            ImpersonateProcessByName("lsass", out impersonatedTokenHandle);
 
             impersonatedTokenHandle = CreateWinDefendToken(impersonatedTokenHandle, false);
 
-            PInvoke.ImpersonateLoggedOnUser(impersonatedTokenHandle);
+            Win32.Tokens.ImpersonateLoggedOnUser(impersonatedTokenHandle);
         }
         
-        public static IntPtr StartElevatedProcess(string exe, string command)
+        [InterprocessMethod(Level.Administrator)]
+        public static int StartElevatedProcess(string exe, string command)
         {
-            IntPtr impersonatedTokenHandle = IntPtr.Zero;
+            ImpersonateProcessByName("winlogon", out Win32.TokensEx.SafeTokenHandle impersonatedTokenHandle);
+            impersonatedTokenHandle.Dispose();
 
-            ImpersonateProcessByName("winlogon", ref impersonatedTokenHandle);
-
-            ImpersonateProcessByName("lsass", ref impersonatedTokenHandle);
+            ImpersonateProcessByName("lsass", out impersonatedTokenHandle);
 
             impersonatedTokenHandle = CreateWinDefendToken(impersonatedTokenHandle, true);
 
-            var startupInfo = new PInvoke.STARTUPINFO();
-            startupInfo.cb = Marshal.SizeOf(startupInfo);
-            startupInfo.lpDesktop = "Winsta0\\Default";
-
-            if (!String.IsNullOrEmpty(command))
-                command = command.Insert(0, " ");
-
-            if (!PInvoke.CreateProcessWithToken(
-                    impersonatedTokenHandle,
-                    PInvoke.LogonFlags.WithProfile,
-                    null,
-                    $@"""{exe}""{command}",
-                    0,
-                    IntPtr.Zero,
-                    Environment.CurrentDirectory,
-                    ref startupInfo,
-                    out PInvoke.PROCESS_INFORMATION processInformation))
-            {
-                throw new Exception(Marshal.GetLastWin32Error().ToString());
-            }
-
-            PInvoke.CloseHandle(processInformation.hThread);
-
-            return processInformation.hProcess;
-        }
-
-        public static uint WaitForProcessExit(IntPtr hProcess, uint timeout = uint.MaxValue)
-        {
+            var process = new AugmentedProcess.Process();
+            process.StartInfo = new AugmentedProcess.ProcessStartInfo(exe, command) { UseShellExecute = false, CreateNoWindow = true };
+            process.Start(AugmentedProcess.Process.CreateType.UserToken, ref impersonatedTokenHandle);
             
-            PInvoke.WaitForSingleObject(hProcess, timeout);
-            if (!PInvoke.GetExitCodeProcess(hProcess, out uint exitCode))
-            {
-                PInvoke.CloseHandle(hProcess);
-                throw new Exception("Process timeout exceeded: " + Marshal.GetLastWin32Error());
-            }
-            PInvoke.CloseHandle(hProcess);
-
-            return exitCode;
+            return process!.Id;
         }
         
         public 
@@ -416,21 +803,20 @@ namespace TrustedUninstaller.Shared
             {
                 GetDefenderPrivileges();
 
-                AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+                CoreActions.SafeRun(new RegistryValueAction()
                 {
                     KeyName = $"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender Security Center\\Notifications",
                     Value = "DisableNotifications",
                     Data = 1,
                     Type = RegistryValueType.REG_DWORD
-                }).Wait();
-                AmeliorationUtil.SafeRunAction(new RegistryValueAction()
+                });
+                CoreActions.SafeRun(new RegistryValueAction()
                 {
                     KeyName = @"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Notifications\Settings\Windows.SystemToast.SecurityAndMaintenance",
                     Value = "Enabled",
                     Data = 0,
-                    Scope = Scope.CurrentUser,
                     Type = RegistryValueType.REG_DWORD
-                }).Wait();
+                });
                 
                 var services = ServiceController.GetServices();
                 var devices = ServiceController.GetDevices();
@@ -465,11 +851,11 @@ namespace TrustedUninstaller.Shared
                         }
                         catch (Exception e)
                         { 
-                            ErrorLogger.WriteToErrorLog("Service stop error: " + e.GetType() + " " + e.Message, null, "Defender kill warning", controller.ServiceName);
+                            Log.EnqueueExceptionSafe(e, "Service stop error.");
                             notStopped.Add(controller);
                         }
                     } catch (Exception e)
-                    { ErrorLogger.WriteToErrorLog("Error during service kill loop: " + e.GetType() + " " + e.Message, e.StackTrace, "Defender kill warning", item.Key); }
+                    { Log.EnqueueExceptionSafe(e, "Error during service kill loop."); }
                 }
 
                 foreach (var controller in stopped)
@@ -478,7 +864,7 @@ namespace TrustedUninstaller.Shared
                     {
                         controller.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(5));
                     } catch (Exception e)
-                    { ErrorLogger.WriteToErrorLog("Error waiting for service: " + e.GetType() + " " + e.Message, null, "Defender kill warning", controller.ServiceName); }
+                    { Log.EnqueueExceptionSafe(e, "Error waiting for service."); }
                 }
                 
                 if (notStopped.Count > 0)
@@ -493,13 +879,13 @@ namespace TrustedUninstaller.Shared
                             controller.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(7));
                         }
                         catch (Exception e)
-                        { ErrorLogger.WriteToErrorLog("Service stop re-try error: " + e.GetType() + " " + e.Message, null, "Defender kill warning", controller.ServiceName); }
+                        { Log.EnqueueExceptionSafe(e, "Service stop re-try error."); }
                     }
                 }
 
                 if (Process.GetProcessesByName("MsMpEng").Any())
                 {
-                    ErrorLogger.WriteToErrorLog("First Defender stop failed", null, "Defender kill warning");
+                    Log.EnqueueSafe(LogType.Warning, "First Defender stop failed.", new SerializableTrace());
                     
                     new RunAction()
                     {
@@ -511,1127 +897,188 @@ namespace TrustedUninstaller.Shared
                             "net stop WinDefend\"",
                         CreateWindow = false,
                         Timeout = 7500,
-                    }.RunTaskOnMainThread();
+                    }.RunTask();
                 }
 
                 return !Process.GetProcessesByName("MsMpEng").Any();
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog("Unknown error: " + e.GetType() + " " + e.Message, e.StackTrace, "Defender kill error");
+                Log.EnqueueExceptionSafe(e, "Unknown error.");
                 return false;
             }
         }
 
-        private static IntPtr CreateWinDefendToken(IntPtr handle, bool primary)
+        private static Win32.TokensEx.SafeTokenHandle CreateWinDefendToken(Win32.TokensEx.SafeTokenHandle handle, bool primary)
         {
-            var privileges = new string[] {
-                PInvoke.SE_CREATE_TOKEN_NAME,
-                PInvoke.SE_ASSIGNPRIMARYTOKEN_NAME,
-                PInvoke.SE_LOCK_MEMORY_NAME,
-                PInvoke.SE_INCREASE_QUOTA_NAME,
-                PInvoke.SE_MACHINE_ACCOUNT_NAME,
-                PInvoke.SE_TCB_NAME,
-                PInvoke.SE_SECURITY_NAME,
-                PInvoke.SE_TAKE_OWNERSHIP_NAME,
-                PInvoke.SE_LOAD_DRIVER_NAME,
-                PInvoke.SE_SYSTEM_PROFILE_NAME,
-                PInvoke.SE_SYSTEMTIME_NAME,
-                PInvoke.SE_PROFILE_SINGLE_PROCESS_NAME,
-                PInvoke.SE_INCREASE_BASE_PRIORITY_NAME,
-                PInvoke.SE_CREATE_PAGEFILE_NAME,
-                PInvoke.SE_CREATE_PERMANENT_NAME,
-                PInvoke.SE_BACKUP_NAME,
-                PInvoke.SE_RESTORE_NAME,
-                PInvoke.SE_SHUTDOWN_NAME,
-                PInvoke.SE_DEBUG_NAME,
-                PInvoke.SE_AUDIT_NAME,
-                PInvoke.SE_SYSTEM_ENVIRONMENT_NAME,
-                PInvoke.SE_CHANGE_NOTIFY_NAME,
-                PInvoke.SE_REMOTE_SHUTDOWN_NAME,
-                PInvoke.SE_UNDOCK_NAME,
-                PInvoke.SE_SYNC_AGENT_NAME,
-                PInvoke.SE_ENABLE_DELEGATION_NAME,
-                PInvoke.SE_MANAGE_VOLUME_NAME,
-                PInvoke.SE_IMPERSONATE_NAME,
-                PInvoke.SE_CREATE_GLOBAL_NAME,
-                PInvoke.SE_TRUSTED_CREDMAN_ACCESS_NAME,
-                PInvoke.SE_RELABEL_NAME,
-                PInvoke.SE_INCREASE_WORKING_SET_NAME,
-                PInvoke.SE_TIME_ZONE_NAME,
-                PInvoke.SE_CREATE_SYMBOLIC_LINK_NAME,
-                PInvoke.SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME
-            };
-            
-            PInvoke.ConvertStringSidToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", out IntPtr tiSid);
-            PInvoke.ConvertStringSidToSid("S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736", out IntPtr defSid);
-            
-            PInvoke.SidIdentifierAuthority NtAuthority = new PInvoke.SidIdentifierAuthority();
-            NtAuthority.Value = new byte[] { 0, 0, 0, 0, 0, PInvoke.NtSecurityAuthority };
-            
-            PInvoke.TOKEN_USER tokenUser = new PInvoke.TOKEN_USER();
-            
-            PInvoke.AllocateAndInitializeSid(ref NtAuthority, 1, 18, 0, 0, 0, 0, 0, 0, 0, out IntPtr pLocalSystem);
+            Win32.TokensEx.AdjustCurrentPrivilege(Win32.Tokens.SE_ASSIGNPRIMARYTOKEN_NAME);
+            Win32.TokensEx.AdjustCurrentPrivilege(Win32.Tokens.SE_INCREASE_QUOTA_NAME);
 
-            tokenUser.User.Sid = pLocalSystem;
-            tokenUser.User.Attributes = 0;
-            tokenUser.User.Attributes = 0;
-            
-            var pTokenPrivileges = GetInfoFromToken(handle, PInvoke.TOKEN_INFORMATION_CLASS.TokenPrivileges);
-            var pTokenGroups = GetInfoFromToken(handle, PInvoke.TOKEN_INFORMATION_CLASS.TokenGroups);
-            var pTokenPrimaryGroup = GetInfoFromToken(handle, PInvoke.TOKEN_INFORMATION_CLASS.TokenPrimaryGroup);
-            var pTokenDefaultDacl = GetInfoFromToken(handle, PInvoke.TOKEN_INFORMATION_CLASS.TokenDefaultDacl);
-
-            if (primary || !PInvoke.CreateTokenPrivileges(
-                    privileges,
-                    out PInvoke.TOKEN_PRIVILEGES tokenPrivileges))
+            var privileges = new[]
             {
-                tokenPrivileges =
-                    (PInvoke.TOKEN_PRIVILEGES)Marshal.PtrToStructure(pTokenPrivileges, typeof(PInvoke.TOKEN_PRIVILEGES));
-            }
+                Win32.Tokens.SE_INCREASE_QUOTA_NAME,
+                Win32.Tokens.SE_MACHINE_ACCOUNT_NAME,
+                Win32.Tokens.SE_SECURITY_NAME,
+                Win32.Tokens.SE_TAKE_OWNERSHIP_NAME,
+                Win32.Tokens.SE_LOAD_DRIVER_NAME,
+                Win32.Tokens.SE_SYSTEM_PROFILE_NAME,
+                Win32.Tokens.SE_SYSTEMTIME_NAME,
+                Win32.Tokens.SE_PROFILE_SINGLE_PROCESS_NAME,
+                Win32.Tokens.SE_INCREASE_BASE_PRIORITY_NAME,
+                Win32.Tokens.SE_CREATE_PERMANENT_NAME,
+                Win32.Tokens.SE_BACKUP_NAME,
+                Win32.Tokens.SE_RESTORE_NAME,
+                Win32.Tokens.SE_SHUTDOWN_NAME,
+                Win32.Tokens.SE_DEBUG_NAME,
+                Win32.Tokens.SE_AUDIT_NAME,
+                Win32.Tokens.SE_SYSTEM_ENVIRONMENT_NAME,
+                Win32.Tokens.SE_CHANGE_NOTIFY_NAME,
+                Win32.Tokens.SE_UNDOCK_NAME,
+                Win32.Tokens.SE_SYNC_AGENT_NAME,
+                Win32.Tokens.SE_ENABLE_DELEGATION_NAME,
+                Win32.Tokens.SE_MANAGE_VOLUME_NAME,
+                Win32.Tokens.SE_IMPERSONATE_NAME,
+                Win32.Tokens.SE_CREATE_GLOBAL_NAME,
+                Win32.Tokens.SE_TRUSTED_CREDMAN_ACCESS_NAME,
+                Win32.Tokens.SE_RELABEL_NAME,
+                Win32.Tokens.SE_TIME_ZONE_NAME,
+                Win32.Tokens.SE_CREATE_SYMBOLIC_LINK_NAME,
+                Win32.Tokens.SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME,
+                Win32.Tokens.SE_ASSIGNPRIMARYTOKEN_NAME,
+                Win32.Tokens.SE_REMOTE_SHUTDOWN_NAME,
+                Win32.Tokens.SE_INCREASE_WORKING_SET_NAME,
+                Win32.Tokens.SE_TCB_NAME,
+                Win32.Tokens.SE_CREATE_PAGEFILE_NAME,
+                Win32.Tokens.SE_LOCK_MEMORY_NAME,
+                Win32.Tokens.SE_CREATE_TOKEN_NAME
+            };
+            var authId = Win32.Tokens.SYSTEM_LUID;
             
-            var tokenGroups = (PInvoke.TOKEN_GROUPS)Marshal.PtrToStructure(
-                pTokenGroups,
-                typeof(PInvoke.TOKEN_GROUPS));
-            var tokenOwner = new PInvoke.TOKEN_OWNER(pLocalSystem);
-            var tokenPrimaryGroup = (PInvoke.TOKEN_PRIMARY_GROUP)
-                Marshal.PtrToStructure(
-                pTokenPrimaryGroup,
-                typeof(PInvoke.TOKEN_PRIMARY_GROUP));
-            var tokenDefaultDacl = (PInvoke.TOKEN_DEFAULT_DACL)Marshal.PtrToStructure(
-                pTokenDefaultDacl,
-                typeof(PInvoke.TOKEN_DEFAULT_DACL));
-            Console.WriteLine(tokenGroups.GroupCount + ":" + tokenGroups.Groups.Length);
+            Win32.SID.SID_IDENTIFIER_AUTHORITY ntAuthority = new Win32.SID.SID_IDENTIFIER_AUTHORITY();
+            ntAuthority.Value = new byte[] { 0, 0, 0, 0, 0, Win32.SID.NtSecurityAuthority };
+            
+            Win32.SID.AllocateAndInitializeSid(ref ntAuthority, 1, 18, 0, 0, 0, 0, 0, 0, 0, out Win32.SID.SafeSIDHandle pLocalSystem);
+
+            Win32.Tokens.TOKEN_USER tokenUser = new Win32.Tokens.TOKEN_USER();
+            tokenUser.User.Sid = pLocalSystem.DangerousGetHandle();
+            tokenUser.User.Attributes = 0;
+
+            var pTokenPrivileges =
+                Win32.TokensEx.GetInfoFromToken(handle, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenPrivileges, Marshal.SizeOf<Win32.Tokens.TOKEN_PRIVILEGES>());
+            var pTokenGroups =
+                Win32.TokensEx.GetInfoFromToken(handle, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenGroups, Marshal.SizeOf<Win32.Tokens.TOKEN_GROUPS>());
+            var pTokenPrimaryGroup =
+                Win32.TokensEx.GetInfoFromToken(handle, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenPrimaryGroup, Marshal.SizeOf<Win32.Tokens.TOKEN_PRIMARY_GROUP>());
+            var pTokenDefaultDacl =
+                Win32.TokensEx.GetInfoFromToken(handle, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenDefaultDacl, Marshal.SizeOf<Win32.Tokens.TOKEN_DEFAULT_DACL>());
+
+            var tokenPrivileges = Win32.TokensEx.CreateTokenPrivileges(privileges);
+            var tokenGroups = (Win32.Tokens.TOKEN_GROUPS)Marshal.PtrToStructure(
+                pTokenGroups, typeof(Win32.Tokens.TOKEN_GROUPS));
+            var tokenPrimaryGroup =
+                (Win32.Tokens.TOKEN_PRIMARY_GROUP)Marshal.PtrToStructure(pTokenPrimaryGroup,
+                    typeof(Win32.Tokens.TOKEN_PRIMARY_GROUP));
+            var tokenDefaultDacl = (Win32.Tokens.TOKEN_DEFAULT_DACL)Marshal.PtrToStructure(
+                pTokenDefaultDacl, typeof(Win32.Tokens.TOKEN_DEFAULT_DACL));
+            
+            var tokenOwner = new Win32.Tokens.TOKEN_OWNER(pLocalSystem.DangerousGetHandle());
+            var tokenSource = new Win32.Tokens.TOKEN_SOURCE("*SYSTEM*") { SourceIdentifier = { LowPart = 0, HighPart = 0 } };
+
+            List<string> requiredGroups = new List<string>()
+            {
+                Win32.SID.DOMAIN_ALIAS_RID_ADMINS,
+                Win32.SID.DOMAIN_ALIAS_RID_LOCAL_AND_ADMIN_GROUP,
+                Win32.SID.TRUSTED_INSTALLER_RID,
+                Win32.SID.NT_SERVICE_SID,
+                "S-1-5-80-1913148863-3492339771-4165695881-2087618961-4109116736"
+            };
+            List<Win32.SID.SafeSIDHandle> requiredSids = new List<Win32.SID.SafeSIDHandle>();
+            
             for (var idx = 0; idx < tokenGroups.GroupCount - 1; idx++)
             {
-                PInvoke.ConvertSidToStringSid(
-                    tokenGroups.Groups[idx].Sid,
-                    out string strSid);
-
-                if (string.Compare(strSid, PInvoke.DOMAIN_ALIAS_RID_ADMINS, StringComparison.OrdinalIgnoreCase) == 0)
+                Win32.SID.ConvertSidToStringSid(tokenGroups.Groups[idx].Sid, out string strSid);
+                foreach (var requiredGroup in requiredGroups.ToArray())
                 {
-                    tokenGroups.Groups[idx].Attributes = (uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED | (uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT;
+                    if (string.Compare(strSid, requiredGroup, StringComparison.OrdinalIgnoreCase) == 0)
+                    {
+                        tokenGroups.Groups[idx].Attributes &= ~(uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_USE_FOR_DENY_ONLY;
+                        tokenGroups.Groups[idx].Attributes |= 
+                            (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED |
+                            (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT |
+                            (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_OWNER;
+                        requiredGroups.Remove(requiredGroup);
+                    }
                 }
+            }
+            
+            foreach (var requiredGroup in requiredGroups)
+            {
+                Win32.SID.ConvertStringSidToSid(requiredGroup, out Win32.SID.SafeSIDHandle sid);
+                if (sid.IsInvalid)
+                    Log.EnqueueSafe(LogType.Warning, "Could not convert string SID to SID: " + requiredGroup, new SerializableTrace());
                 else
                 {
-                    tokenGroups.Groups[idx].Attributes &= ~(uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_OWNER;
+                    requiredSids.Add(sid);
+                    tokenGroups.Groups[tokenGroups.GroupCount].Sid = sid.DangerousGetHandle();
+                    tokenGroups.Groups[tokenGroups.GroupCount].Attributes =
+                        (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED |
+                        (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT |
+                        (uint)Win32.Tokens.SE_GROUP_ATTRIBUTES.SE_GROUP_OWNER;
+                    tokenGroups.GroupCount++;
                 }
             }
 
-            tokenGroups.Groups[tokenGroups.GroupCount].Sid = tiSid;
-            tokenGroups.Groups[tokenGroups.GroupCount].Attributes = (uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED | (uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT;
-            tokenGroups.GroupCount++;
-            
-            tokenGroups.Groups[tokenGroups.GroupCount].Sid = defSid;
-            tokenGroups.Groups[tokenGroups.GroupCount].Attributes = (uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED | (uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_ENABLED_BY_DEFAULT | (uint)PInvoke.SE_GROUP_ATTRIBUTES.SE_GROUP_OWNER;
-            tokenGroups.GroupCount++;
-            
-            var authId = PInvoke.SYSTEM_LUID;
-
-            var tokenSource = new PInvoke.TOKEN_SOURCE("*SYSTEM*") { SourceIdentifier = { LowPart = 0, HighPart = 0 } };
-
-            var expirationTime = new PInvoke.LARGE_INTEGER(-1L);
-            var sqos = new PInvoke.SECURITY_QUALITY_OF_SERVICE(primary ? PInvoke.SECURITY_IMPERSONATION_LEVEL.SecurityIdentification : PInvoke.SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation,
-                PInvoke.SECURITY_STATIC_TRACKING,
+            var expirationTime = new Win32.LARGE_INTEGER() { QuadPart = -1L };
+            var sqos = new Win32.Tokens.SECURITY_QUALITY_OF_SERVICE(
+                Win32.Tokens.SECURITY_IMPERSONATION_LEVEL.SecurityIdentification, Win32.Tokens.SECURITY_STATIC_TRACKING,
                 0);
-            var oa = new PInvoke.OBJECT_ATTRIBUTES(string.Empty, 0);
-            IntPtr pSqos = Marshal.AllocHGlobal(Marshal.SizeOf(sqos));
+            var oa = new Win32.Tokens.OBJECT_ATTRIBUTES(string.Empty, 0) { };
+            var pSqos = Marshal.AllocHGlobal(Marshal.SizeOf(sqos));
             Marshal.StructureToPtr(sqos, pSqos, true);
             oa.SecurityQualityOfService = pSqos;
 
-            var status = PInvoke.ZwCreateToken(
-                out IntPtr elevatedToken,
-                PInvoke.TokenAccessFlags.TOKEN_ALL_ACCESS,
-                ref oa,
-                primary ? PInvoke.TOKEN_TYPE.TokenPrimary : PInvoke.TOKEN_TYPE.TokenImpersonation,
-                ref authId,
-                ref expirationTime,
-                ref tokenUser,
-                ref tokenGroups,
-                ref tokenPrivileges,
-                ref tokenOwner,
-                ref tokenPrimaryGroup,
-                ref tokenDefaultDacl,
-                ref tokenSource
-            );
+            var status = Win32.Tokens.ZwCreateToken(out Win32.TokensEx.SafeTokenHandle elevatedToken,
+                Win32.Tokens.TokenAccessFlags.TOKEN_ALL_ACCESS, ref oa, Win32.Tokens.TOKEN_TYPE.TokenPrimary,
+                ref authId, ref expirationTime, ref tokenUser, ref tokenGroups, ref tokenPrivileges, ref tokenOwner,
+                ref tokenPrimaryGroup, ref tokenDefaultDacl, ref tokenSource);
 
-            PInvoke.LocalFree(pTokenGroups);
-            PInvoke.LocalFree(pTokenDefaultDacl);
-            PInvoke.LocalFree(pTokenPrivileges);
-            PInvoke.LocalFree(pTokenPrimaryGroup);
-            
-            PInvoke.FreeSid(pLocalSystem);
-            PInvoke.FreeSid(tiSid);
-            PInvoke.FreeSid(defSid);
+            Win32.LocalFree(pTokenGroups);
+            Win32.LocalFree(pTokenDefaultDacl);
+            Win32.LocalFree(pTokenPrivileges);
+            Win32.LocalFree(pTokenPrimaryGroup);
+
+            requiredSids.ForEach(x => x.Dispose());
+            pLocalSystem.Dispose();
+
+            if (status != 0)
+                throw new Win32Exception($"Error creating defender token: " + status);
+
+            var sessionId = Process.GetCurrentProcess().SessionId;
+            if (!Win32.Tokens.SetTokenInformation(elevatedToken, Win32.Tokens.TOKEN_INFORMATION_CLASS.TokenSessionId, ref sessionId, sizeof(int)))
+                throw new Win32Exception("Error setting token session id: " + Marshal.GetLastWin32Error());
 
             return elevatedToken;
         }
 
-        private static IntPtr GetInfoFromToken(IntPtr currentToken, PInvoke.TOKEN_INFORMATION_CLASS tic)
+        private static void ImpersonateProcessByName(string name, out Win32.TokensEx.SafeTokenHandle handle)
         {
-            int length;
+            using var process = Process.GetProcessesByName(name).First();
+            var processHandle = new SafeProcessHandle(process.Handle, false);
 
-            PInvoke.GetTokenInformation(currentToken, tic, IntPtr.Zero, 0, out length);
+            Win32.Tokens.OpenProcessToken(processHandle,
+                Win32.Tokens.TokenAccessFlags.TOKEN_DUPLICATE | Win32.Tokens.TokenAccessFlags.TOKEN_ASSIGN_PRIMARY |
+                Win32.Tokens.TokenAccessFlags.TOKEN_QUERY |
+                Win32.Tokens.TokenAccessFlags.TOKEN_IMPERSONATE, out Win32.TokensEx.SafeTokenHandle tokenHandle);
 
-            IntPtr info = Marshal.AllocHGlobal(length);
-            PInvoke.GetTokenInformation(currentToken, tic, info, length, out length);
-            return info;
-        }
-
-        private static void ImpersonateProcessByName(string name, ref IntPtr handle)
-        {
-            var processHandle = Process.GetProcessesByName(name).First().Handle;
-
-            PInvoke.OpenProcessToken(processHandle,
-                PInvoke.TokenAccessFlags.TOKEN_DUPLICATE | PInvoke.TokenAccessFlags.TOKEN_ASSIGN_PRIMARY |
-                PInvoke.TokenAccessFlags.TOKEN_QUERY |
-                PInvoke.TokenAccessFlags.TOKEN_IMPERSONATE, out IntPtr tokenHandle);
-
-            PInvoke.DuplicateTokenEx(tokenHandle, PInvoke.TokenAccessFlags.TOKEN_ALL_ACCESS,
-                IntPtr.Zero, PInvoke.SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation,
-                PInvoke.TOKEN_TYPE.TokenImpersonation,
+            Win32.Tokens.DuplicateTokenEx(tokenHandle, Win32.Tokens.TokenAccessFlags.TOKEN_ALL_ACCESS,
+                IntPtr.Zero, Win32.Tokens.SECURITY_IMPERSONATION_LEVEL.SecurityImpersonation,
+                Win32.Tokens.TOKEN_TYPE.TokenImpersonation,
                 out handle);
 
-            PInvoke.ImpersonateLoggedOnUser(handle);
+            if (!Win32.Tokens.ImpersonateLoggedOnUser(handle))
+                throw new Win32Exception("Error impersonating token: " + Marshal.GetLastWin32Error());
 
-            PInvoke.CloseHandle(tokenHandle);
-            PInvoke.CloseHandle(processHandle);
-        }
-
-        private static class PInvoke
-        {
-            [DllImport("kernel32.dll", SetLastError = true)]
-            [return: MarshalAs(UnmanagedType.Bool)]
-            internal static extern bool GetExitCodeProcess(IntPtr hProcess, out uint lpExitCode);
-            
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct PROCESS_INFORMATION
-            {
-                public IntPtr hProcess;
-                public IntPtr hThread;
-                public int dwProcessId;
-                public int dwThreadId;
-            }
-            
-            [DllImport("kernel32.dll", SetLastError = true)]
-            internal static extern uint WaitForSingleObject(
-                IntPtr hHandle,
-                uint dwMilliseconds);
-
-            [DllImport("advapi32", SetLastError = true, CharSet = CharSet.Auto)]
-            internal static extern bool CreateProcessWithToken(
-                IntPtr hToken,
-                LogonFlags dwLogonFlags,
-                string lpApplicationName,
-                string lpCommandLine,
-                ProcessCreationFlags dwCreationFlags,
-                IntPtr lpEnvironment,
-                string lpCurrentDirectory,
-                ref STARTUPINFO lpStartupInfo,
-                out PROCESS_INFORMATION lpProcessInformation);
-           internal  enum LogonFlags
-            {
-                WithProfile = 1,
-                NetCredentialsOnly
-            }
-
-            [Flags]
-            internal enum ProcessCreationFlags : uint
-            {
-                DEBUG_PROCESS = 0x00000001,
-                DEBUG_ONLY_THIS_PROCESS = 0x00000002,
-                CREATE_SUSPENDED = 0x00000004,
-                DETACHED_PROCESS = 0x00000008,
-                CREATE_NEW_CONSOLE = 0x00000010,
-                CREATE_NEW_PROCESS_GROUP = 0x00000200,
-                CREATE_UNICODE_ENVIRONMENT = 0x00000400,
-                CREATE_SEPARATE_WOW_VDM = 0x00000800,
-                CREATE_SHARED_WOW_VDM = 0x00001000,
-                INHERIT_PARENT_AFFINITY = 0x00010000,
-                CREATE_PROTECTED_PROCESS = 0x00040000,
-                EXTENDED_STARTUPINFO_PRESENT = 0x00080000,
-                CREATE_BREAKAWAY_FROM_JOB = 0x01000000,
-                CREATE_PRESERVE_CODE_AUTHZ_LEVEL = 0x02000000,
-                CREATE_DEFAULT_ERROR_MODE = 0x04000000,
-                CREATE_NO_WINDOW = 0x08000000,
-            }
-            [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-            internal struct STARTUPINFO
-            {
-                public int cb;
-                public string lpReserved;
-                public string lpDesktop;
-                public string lpTitle;
-                public int dwX;
-                public int dwY;
-                public int dwXSize;
-                public int dwYSize;
-                public int dwXCountChars;
-                public int dwYCountChars;
-                public int dwFillAttribute;
-                public int dwFlags;
-                public short wShowWindow;
-                public short cbReserved2;
-                public IntPtr lpReserved2;
-                public IntPtr hStdInput;
-                public IntPtr hStdOutput;
-                public IntPtr hStdError;
-            }
-
-            
-            internal static bool CreateTokenPrivileges(
-                string[] privs,
-                out TOKEN_PRIVILEGES tokenPrivileges)
-            {
-                int error;
-                int sizeOfStruct = Marshal.SizeOf(typeof(TOKEN_PRIVILEGES));
-                IntPtr pPrivileges = Marshal.AllocHGlobal(sizeOfStruct);
-
-                tokenPrivileges = (TOKEN_PRIVILEGES)Marshal.PtrToStructure(
-                    pPrivileges,
-                    typeof(TOKEN_PRIVILEGES));
-                tokenPrivileges.PrivilegeCount = privs.Length;
-
-                for (var idx = 0; idx < tokenPrivileges.PrivilegeCount; idx++)
-                {
-                    if (!LookupPrivilegeValue(
-                            null,
-                            privs[idx],
-                            out LUID luid))
-                    {
-                        return false;
-                    }
-
-                    tokenPrivileges.Privileges[idx].Attributes = (uint)(
-                        SE_PRIVILEGE_ATTRIBUTES.SE_PRIVILEGE_ENABLED |
-                        SE_PRIVILEGE_ATTRIBUTES.SE_PRIVILEGE_ENABLED_BY_DEFAULT);
-                    tokenPrivileges.Privileges[idx].Luid = luid;
-                }
-
-                return true;
-            }
-            
-            [DllImport("advapi32.dll", SetLastError = true)]
-            static extern bool LookupPrivilegeValue(
-                string lpSystemName,
-                string lpName,
-                out LUID lpLuid);
-            
-            [Flags]
-            enum SE_PRIVILEGE_ATTRIBUTES : uint
-            {
-                SE_PRIVILEGE_ENABLED_BY_DEFAULT = 0x00000001,
-                SE_PRIVILEGE_ENABLED = 0x00000002,
-                SE_PRIVILEGE_USED_FOR_ACCESS = 0x80000000,
-            }
-
-            
-            [DllImport("kernel32.dll", SetLastError = true)]
-            internal static extern bool CloseHandle(IntPtr hObject);
-            
-            [DllImport("kernel32.dll", SetLastError = true)]
-            internal static extern IntPtr LocalFree(IntPtr hMem);
-            
-            [Flags]
-            internal enum SE_GROUP_ATTRIBUTES : uint
-            {
-                SE_GROUP_MANDATORY = 0x00000001,
-                SE_GROUP_ENABLED_BY_DEFAULT = 0x00000002,
-                SE_GROUP_ENABLED = 0x00000004,
-                SE_GROUP_OWNER = 0x00000008,
-                SE_GROUP_USE_FOR_DENY_ONLY = 0x00000010,
-                SE_GROUP_INTEGRITY = 0x00000020,
-                SE_GROUP_INTEGRITY_ENABLED = 0x00000040,
-                SE_GROUP_RESOURCE = 0x20000000,
-                SE_GROUP_LOGON_ID = 0xC0000000
-            }
-            
-            [DllImport("advapi32", CharSet = CharSet.Auto, SetLastError = true)]
-            internal static extern bool ConvertSidToStringSid(IntPtr pSid, out string strSid);
-            
-            // Windows Struct
-            [StructLayout(LayoutKind.Explicit, Size = 8)]
-            internal struct LARGE_INTEGER
-            {
-                [FieldOffset(0)]
-                public int Low;
-                [FieldOffset(4)]
-                public int High;
-                [FieldOffset(0)]
-                public long QuadPart;
-
-                public LARGE_INTEGER(int _low, int _high)
-                {
-                    QuadPart = 0L;
-                    Low = _low;
-                    High = _high;
-                }
-
-                public LARGE_INTEGER(long _quad)
-                {
-                    Low = 0;
-                    High = 0;
-                    QuadPart = _quad;
-                }
-
-                public long ToInt64()
-                {
-                    return ((long)this.High << 32) | (uint)this.Low;
-                }
-
-                public static LARGE_INTEGER FromInt64(long value)
-                {
-                    return new LARGE_INTEGER
-                    {
-                        Low = (int)(value),
-                        High = (int)((value >> 32))
-                    };
-                }
-            }
-
-
-            [DllImport("ntdll.dll")]
-            internal static extern int ZwCreateToken(
-                out IntPtr TokenHandle,
-                TokenAccessFlags DesiredAccess,
-                ref OBJECT_ATTRIBUTES ObjectAttributes,
-                TOKEN_TYPE TokenType,
-                ref LUID AuthenticationId,
-                ref LARGE_INTEGER ExpirationTime,
-                ref TOKEN_USER TokenUser,
-                ref TOKEN_GROUPS TokenGroups,
-                ref TOKEN_PRIVILEGES TokenPrivileges,
-                ref TOKEN_OWNER TokenOwner,
-                ref TOKEN_PRIMARY_GROUP TokenPrimaryGroup,
-                ref TOKEN_DEFAULT_DACL TokenDefaultDacl,
-                ref TOKEN_SOURCE TokenSource);
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct TOKEN_DEFAULT_DACL
-            {
-                internal IntPtr DefaultDacl; // PACL
-            }
-
-            [Flags]
-            internal enum TokenAccessFlags : uint
-            {
-                TOKEN_ADJUST_DEFAULT = 0x0080,
-                TOKEN_ADJUST_GROUPS = 0x0040,
-                TOKEN_ADJUST_PRIVILEGES = 0x0020,
-                TOKEN_ADJUST_SESSIONID = 0x0100,
-                TOKEN_ASSIGN_PRIMARY = 0x0001,
-                TOKEN_DUPLICATE = 0x0002,
-                TOKEN_EXECUTE = 0x00020000,
-                TOKEN_IMPERSONATE = 0x0004,
-                TOKEN_QUERY = 0x0008,
-                TOKEN_QUERY_SOURCE = 0x0010,
-                TOKEN_READ = 0x00020008,
-                TOKEN_WRITE = 0x000200E0,
-                TOKEN_ALL_ACCESS = 0x000F01FF,
-                MAXIMUM_ALLOWED = 0x02000000
-            }
-
-
-            [DllImport("advapi32.dll", SetLastError = true)]
-            internal static extern bool ConvertStringSidToSid(
-                string StringSid,
-                out IntPtr ptrSid
-            );
-
-            [StructLayout(LayoutKind.Sequential, Pack = 4)]
-            internal struct LUID_AND_ATTRIBUTES
-            {
-                internal LUID Luid;
-                internal UInt32 Attributes;
-            }
-
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct TOKEN_PRIVILEGES
-            {
-                public int PrivilegeCount;
-                [MarshalAs(UnmanagedType.ByValArray, SizeConst = 36)]
-                public LUID_AND_ATTRIBUTES[] Privileges;
-
-                public TOKEN_PRIVILEGES(int privilegeCount)
-                {
-                    PrivilegeCount = privilegeCount;
-                    Privileges = new LUID_AND_ATTRIBUTES[36];
-                }
-            }
-
-            [DllImport("advapi32.dll", SetLastError = true)]
-            internal static extern bool OpenProcessToken(
-                IntPtr hProcess,
-                TokenAccessFlags DesiredAccess,
-                out IntPtr hToken);
-
-            internal enum SECURITY_IMPERSONATION_LEVEL
-            {
-                SecurityAnonymous,
-                SecurityIdentification,
-                SecurityImpersonation,
-                SecurityDelegation
-            }
-
-            internal enum TOKEN_TYPE
-            {
-                TokenPrimary = 1,
-                TokenImpersonation
-            }
-
-            [DllImport("advapi32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-            internal static extern bool DuplicateTokenEx(
-                IntPtr hExistingToken,
-                TokenAccessFlags dwDesiredAccess,
-                IntPtr lpTokenAttributes,
-                SECURITY_IMPERSONATION_LEVEL ImpersonationLevel,
-                TOKEN_TYPE TokenType,
-                out IntPtr phNewToken);
-
-            [DllImport("advapi32.dll", SetLastError = true)]
-            internal static extern bool ImpersonateLoggedOnUser(IntPtr hToken);
-
-            [DllImport("advapi32.dll", SetLastError = true)]
-            internal static extern bool GetTokenInformation(
-                IntPtr TokenHandle,
-                TOKEN_INFORMATION_CLASS TokenInformationClass,
-                IntPtr TokenInformation,
-                int TokenInformationLength,
-                out int ReturnLength);
-
-            internal enum TOKEN_INFORMATION_CLASS
-            {
-                TokenUser = 1,
-                TokenGroups,
-                TokenPrivileges,
-                TokenOwner,
-                TokenPrimaryGroup,
-                TokenDefaultDacl,
-                TokenSource,
-                TokenType,
-                TokenImpersonationLevel,
-                TokenStatistics,
-                TokenRestrictedSids,
-                TokenSessionId,
-                TokenGroupsAndPrivileges,
-                TokenSessionReference,
-                TokenSandBoxInert,
-                TokenAuditPolicy,
-                TokenOrigin
-            }
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct UNICODE_STRING : IDisposable
-            {
-                internal ushort Length;
-                internal ushort MaximumLength;
-                private IntPtr buffer;
-
-                internal UNICODE_STRING(string s)
-                {
-                    Length = (ushort)(s.Length * 2);
-                    MaximumLength = (ushort)(Length + 2);
-                    buffer = Marshal.StringToHGlobalUni(s);
-                }
-
-                public void Dispose()
-                {
-                    Marshal.FreeHGlobal(buffer);
-                    buffer = IntPtr.Zero;
-                }
-
-                public override string ToString()
-                {
-                    return Marshal.PtrToStringUni(buffer);
-                }
-            }
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct SECURITY_QUALITY_OF_SERVICE
-            {
-                public int Length;
-                public SECURITY_IMPERSONATION_LEVEL ImpersonationLevel;
-                public byte ContextTrackingMode;
-                public byte EffectiveOnly;
-
-                public SECURITY_QUALITY_OF_SERVICE(
-                    SECURITY_IMPERSONATION_LEVEL _impersonationLevel,
-                    byte _contextTrackingMode,
-                    byte _effectiveOnly)
-                {
-                    Length = 0;
-                    ImpersonationLevel = _impersonationLevel;
-                    ContextTrackingMode = _contextTrackingMode;
-                    EffectiveOnly = _effectiveOnly;
-
-                    Length = Marshal.SizeOf(this);
-                }
-            }
-
-            // Windows Consts
-            internal const int STATUS_SUCCESS = 0;
-            internal static readonly int STATUS_INFO_LENGTH_MISMATCH = Convert.ToInt32("0xC0000004", 16);
-            internal const int ERROR_BAD_LENGTH = 0x00000018;
-            internal const int ERROR_INSUFFICIENT_BUFFER = 0x0000007A;
-            internal static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
-            internal const string DOMAIN_ALIAS_RID_ADMINS = "S-1-5-32-544";
-
-            internal const string TRUSTED_INSTALLER_RID =
-                "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
-
-            internal const string UNTRUSTED_MANDATORY_LEVEL = "S-1-16-0";
-            internal const string LOW_MANDATORY_LEVEL = "S-1-16-4096";
-            internal const string MEDIUM_MANDATORY_LEVEL = "S-1-16-8192";
-            internal const string MEDIUM_PLUS_MANDATORY_LEVEL = "S-1-16-8448";
-            internal const string HIGH_MANDATORY_LEVEL = "S-1-16-12288";
-            internal const string SYSTEM_MANDATORY_LEVEL = "S-1-16-16384";
-            internal const string LOCAL_SYSTEM_RID = "S-1-5-18";
-            internal const string SE_CREATE_TOKEN_NAME = "SeCreateTokenPrivilege";
-            internal const string SE_ASSIGNPRIMARYTOKEN_NAME = "SeAssignPrimaryTokenPrivilege";
-            internal const string SE_LOCK_MEMORY_NAME = "SeLockMemoryPrivilege";
-            internal const string SE_INCREASE_QUOTA_NAME = "SeIncreaseQuotaPrivilege";
-            internal const string SE_MACHINE_ACCOUNT_NAME = "SeMachineAccountPrivilege";
-            internal const string SE_TCB_NAME = "SeTcbPrivilege";
-            internal const string SE_SECURITY_NAME = "SeSecurityPrivilege";
-            internal const string SE_TAKE_OWNERSHIP_NAME = "SeTakeOwnershipPrivilege";
-            internal const string SE_LOAD_DRIVER_NAME = "SeLoadDriverPrivilege";
-            internal const string SE_SYSTEM_PROFILE_NAME = "SeSystemProfilePrivilege";
-            internal const string SE_SYSTEMTIME_NAME = "SeSystemtimePrivilege";
-            internal const string SE_PROFILE_SINGLE_PROCESS_NAME = "SeProfileSingleProcessPrivilege";
-            internal const string SE_INCREASE_BASE_PRIORITY_NAME = "SeIncreaseBasePriorityPrivilege";
-            internal const string SE_CREATE_PAGEFILE_NAME = "SeCreatePagefilePrivilege";
-            internal const string SE_CREATE_PERMANENT_NAME = "SeCreatePermanentPrivilege";
-            internal const string SE_BACKUP_NAME = "SeBackupPrivilege";
-            internal const string SE_RESTORE_NAME = "SeRestorePrivilege";
-            internal const string SE_SHUTDOWN_NAME = "SeShutdownPrivilege";
-            internal const string SE_DEBUG_NAME = "SeDebugPrivilege";
-            internal const string SE_AUDIT_NAME = "SeAuditPrivilege";
-            internal const string SE_SYSTEM_ENVIRONMENT_NAME = "SeSystemEnvironmentPrivilege";
-            internal const string SE_CHANGE_NOTIFY_NAME = "SeChangeNotifyPrivilege";
-            internal const string SE_REMOTE_SHUTDOWN_NAME = "SeRemoteShutdownPrivilege";
-            internal const string SE_UNDOCK_NAME = "SeUndockPrivilege";
-            internal const string SE_SYNC_AGENT_NAME = "SeSyncAgentPrivilege";
-            internal const string SE_ENABLE_DELEGATION_NAME = "SeEnableDelegationPrivilege";
-            internal const string SE_MANAGE_VOLUME_NAME = "SeManageVolumePrivilege";
-            internal const string SE_IMPERSONATE_NAME = "SeImpersonatePrivilege";
-            internal const string SE_CREATE_GLOBAL_NAME = "SeCreateGlobalPrivilege";
-            internal const string SE_TRUSTED_CREDMAN_ACCESS_NAME = "SeTrustedCredManAccessPrivilege";
-            internal const string SE_RELABEL_NAME = "SeRelabelPrivilege";
-            internal const string SE_INCREASE_WORKING_SET_NAME = "SeIncreaseWorkingSetPrivilege";
-            internal const string SE_TIME_ZONE_NAME = "SeTimeZonePrivilege";
-            internal const string SE_CREATE_SYMBOLIC_LINK_NAME = "SeCreateSymbolicLinkPrivilege";
-
-            internal const string SE_DELEGATE_SESSION_USER_IMPERSONATE_NAME =
-                "SeDelegateSessionUserImpersonatePrivilege";
-
-            internal const byte SECURITY_STATIC_TRACKING = 0;
-            internal static readonly LUID ANONYMOUS_LOGON_LUID = new LUID(0x3e6, 0);
-            internal static readonly LUID SYSTEM_LUID = new LUID(0x3e7, 0);
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct LUID
-            {
-                public uint LowPart;
-                public uint HighPart;
-
-                public LUID(uint _lowPart, uint _highPart)
-                {
-                    LowPart = _lowPart;
-                    HighPart = _highPart;
-                }
-            }
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct OBJECT_ATTRIBUTES : IDisposable
-            {
-                internal int Length;
-                internal IntPtr RootDirectory;
-                private IntPtr objectName;
-                internal uint Attributes;
-                internal IntPtr SecurityDescriptor;
-                internal IntPtr SecurityQualityOfService;
-
-                internal OBJECT_ATTRIBUTES(string name, uint attrs)
-                {
-                    Length = 0;
-                    RootDirectory = IntPtr.Zero;
-                    objectName = IntPtr.Zero;
-                    Attributes = attrs;
-                    SecurityDescriptor = IntPtr.Zero;
-                    SecurityQualityOfService = IntPtr.Zero;
-
-                    Length = Marshal.SizeOf(this);
-                    ObjectName = new UNICODE_STRING(name);
-                }
-
-                internal UNICODE_STRING ObjectName
-                {
-                    get
-                    {
-                        return (UNICODE_STRING)Marshal.PtrToStructure(
-                            objectName, typeof(UNICODE_STRING));
-                    }
-
-                    set
-                    {
-                        bool fDeleteOld = objectName != IntPtr.Zero;
-                        if (!fDeleteOld)
-                            objectName = Marshal.AllocHGlobal(Marshal.SizeOf(value));
-                        Marshal.StructureToPtr(value, objectName, fDeleteOld);
-                    }
-                }
-
-                public void Dispose()
-                {
-                    if (objectName != IntPtr.Zero)
-                    {
-                        Marshal.DestroyStructure(objectName, typeof(UNICODE_STRING));
-                        Marshal.FreeHGlobal(objectName);
-                        objectName = IntPtr.Zero;
-                    }
-                }
-            }
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct TOKEN_GROUPS
-            {
-                public int GroupCount;
-                [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
-                public SID_AND_ATTRIBUTES[] Groups;
-
-                public TOKEN_GROUPS(int privilegeCount)
-                {
-                    GroupCount = privilegeCount;
-                    Groups = new SID_AND_ATTRIBUTES[32];
-                }
-            };
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct SID_AND_ATTRIBUTES
-            {
-                internal IntPtr Sid;
-                internal uint Attributes;
-            }
-            internal struct TOKEN_PRIMARY_GROUP
-            {
-                public IntPtr PrimaryGroup; // PSID
-
-                public TOKEN_PRIMARY_GROUP(IntPtr _sid)
-                {
-                    PrimaryGroup = _sid;
-                }
-            }
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct TOKEN_SOURCE
-            {
-                public TOKEN_SOURCE(string name)
-                {
-                    SourceName = new byte[8];
-                    Encoding.GetEncoding(1252).GetBytes(name, 0, name.Length, SourceName, 0);
-                    if (!AllocateLocallyUniqueId(out SourceIdentifier))
-                        throw new System.ComponentModel.Win32Exception();
-                }
-
-                [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)]
-                public byte[] SourceName;
-                public LUID SourceIdentifier;
-            }
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct TOKEN_USER
-            {
-                public SID_AND_ATTRIBUTES User;
-
-                public TOKEN_USER(IntPtr _sid)
-                {
-                    User = new SID_AND_ATTRIBUTES
-                    {
-                        Sid = _sid,
-                        Attributes = 0
-                    };
-                }
-            }
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct TOKEN_OWNER
-            {
-                public IntPtr Owner; // PSID
-
-                public TOKEN_OWNER(IntPtr _owner)
-                {
-                    Owner = _owner;
-                }
-            }
-
-            [DllImport("advapi32.dll", SetLastError = true)]
-            internal static extern bool AllocateAndInitializeSid(
-                ref SidIdentifierAuthority pIdentifierAuthority,
-                byte nSubAuthorityCount,
-                int dwSubAuthority0, int dwSubAuthority1,
-                int dwSubAuthority2, int dwSubAuthority3,
-                int dwSubAuthority4, int dwSubAuthority5,
-                int dwSubAuthority6, int dwSubAuthority7,
-                out IntPtr pSid);
-
-            [StructLayout(LayoutKind.Sequential)]
-            internal struct SidIdentifierAuthority
-            {
-                [MarshalAs(UnmanagedType.ByValArray, SizeConst = 6, ArraySubType = UnmanagedType.I1)]
-                internal byte[] Value;
-            }
-
-            internal const int NtSecurityAuthority = 5;
-            internal const int AuthenticatedUser = 11;
-
-            [DllImport("advapi32.dll")]
-            internal static extern bool AllocateLocallyUniqueId(out LUID allocated);
-
-            [DllImport("advapi32.dll")]
-            internal static extern IntPtr FreeSid(IntPtr pSid);
-
-            internal enum NtStatus : uint
-            {
-                // Success
-                Success = 0x00000000,
-                Wait0 = 0x00000000,
-                Wait1 = 0x00000001,
-                Wait2 = 0x00000002,
-                Wait3 = 0x00000003,
-                Wait63 = 0x0000003f,
-                Abandoned = 0x00000080,
-                AbandonedWait0 = 0x00000080,
-                AbandonedWait1 = 0x00000081,
-                AbandonedWait2 = 0x00000082,
-                AbandonedWait3 = 0x00000083,
-                AbandonedWait63 = 0x000000bf,
-                UserApc = 0x000000c0,
-                KernelApc = 0x00000100,
-                Alerted = 0x00000101,
-                Timeout = 0x00000102,
-                Pending = 0x00000103,
-                Reparse = 0x00000104,
-                MoreEntries = 0x00000105,
-                NotAllAssigned = 0x00000106,
-                SomeNotMapped = 0x00000107,
-                OpLockBreakInProgress = 0x00000108,
-                VolumeMounted = 0x00000109,
-                RxActCommitted = 0x0000010a,
-                NotifyCleanup = 0x0000010b,
-                NotifyEnumDir = 0x0000010c,
-                NoQuotasForAccount = 0x0000010d,
-                PrimaryTransportConnectFailed = 0x0000010e,
-                PageFaultTransition = 0x00000110,
-                PageFaultDemandZero = 0x00000111,
-                PageFaultCopyOnWrite = 0x00000112,
-                PageFaultGuardPage = 0x00000113,
-                PageFaultPagingFile = 0x00000114,
-                CrashDump = 0x00000116,
-                ReparseObject = 0x00000118,
-                NothingToTerminate = 0x00000122,
-                ProcessNotInJob = 0x00000123,
-                ProcessInJob = 0x00000124,
-                ProcessCloned = 0x00000129,
-                FileLockedWithOnlyReaders = 0x0000012a,
-                FileLockedWithWriters = 0x0000012b,
-
-                // Informational
-                Informational = 0x40000000,
-                ObjectNameExists = 0x40000000,
-                ThreadWasSuspended = 0x40000001,
-                WorkingSetLimitRange = 0x40000002,
-                ImageNotAtBase = 0x40000003,
-                RegistryRecovered = 0x40000009,
-
-                // Warning
-                Warning = 0x80000000,
-                GuardPageViolation = 0x80000001,
-                DatatypeMisalignment = 0x80000002,
-                Breakpoint = 0x80000003,
-                SingleStep = 0x80000004,
-                BufferOverflow = 0x80000005,
-                NoMoreFiles = 0x80000006,
-                HandlesClosed = 0x8000000a,
-                PartialCopy = 0x8000000d,
-                DeviceBusy = 0x80000011,
-                InvalidEaName = 0x80000013,
-                EaListInconsistent = 0x80000014,
-                NoMoreEntries = 0x8000001a,
-                LongJump = 0x80000026,
-                DllMightBeInsecure = 0x8000002b,
-
-                // Error
-                Error = 0xc0000000,
-                Unsuccessful = 0xc0000001,
-                NotImplemented = 0xc0000002,
-                InvalidInfoClass = 0xc0000003,
-                InfoLengthMismatch = 0xc0000004,
-                AccessViolation = 0xc0000005,
-                InPageError = 0xc0000006,
-                PagefileQuota = 0xc0000007,
-                InvalidHandle = 0xc0000008,
-                BadInitialStack = 0xc0000009,
-                BadInitialPc = 0xc000000a,
-                InvalidCid = 0xc000000b,
-                TimerNotCanceled = 0xc000000c,
-                InvalidParameter = 0xc000000d,
-                NoSuchDevice = 0xc000000e,
-                NoSuchFile = 0xc000000f,
-                InvalidDeviceRequest = 0xc0000010,
-                EndOfFile = 0xc0000011,
-                WrongVolume = 0xc0000012,
-                NoMediaInDevice = 0xc0000013,
-                NoMemory = 0xc0000017,
-                NotMappedView = 0xc0000019,
-                UnableToFreeVm = 0xc000001a,
-                UnableToDeleteSection = 0xc000001b,
-                IllegalInstruction = 0xc000001d,
-                AlreadyCommitted = 0xc0000021,
-                AccessDenied = 0xc0000022,
-                BufferTooSmall = 0xc0000023,
-                ObjectTypeMismatch = 0xc0000024,
-                NonContinuableException = 0xc0000025,
-                BadStack = 0xc0000028,
-                NotLocked = 0xc000002a,
-                NotCommitted = 0xc000002d,
-                InvalidParameterMix = 0xc0000030,
-                ObjectNameInvalid = 0xc0000033,
-                ObjectNameNotFound = 0xc0000034,
-                ObjectNameCollision = 0xc0000035,
-                ObjectPathInvalid = 0xc0000039,
-                ObjectPathNotFound = 0xc000003a,
-                ObjectPathSyntaxBad = 0xc000003b,
-                DataOverrun = 0xc000003c,
-                DataLate = 0xc000003d,
-                DataError = 0xc000003e,
-                CrcError = 0xc000003f,
-                SectionTooBig = 0xc0000040,
-                PortConnectionRefused = 0xc0000041,
-                InvalidPortHandle = 0xc0000042,
-                SharingViolation = 0xc0000043,
-                QuotaExceeded = 0xc0000044,
-                InvalidPageProtection = 0xc0000045,
-                MutantNotOwned = 0xc0000046,
-                SemaphoreLimitExceeded = 0xc0000047,
-                PortAlreadySet = 0xc0000048,
-                SectionNotImage = 0xc0000049,
-                SuspendCountExceeded = 0xc000004a,
-                ThreadIsTerminating = 0xc000004b,
-                BadWorkingSetLimit = 0xc000004c,
-                IncompatibleFileMap = 0xc000004d,
-                SectionProtection = 0xc000004e,
-                EasNotSupported = 0xc000004f,
-                EaTooLarge = 0xc0000050,
-                NonExistentEaEntry = 0xc0000051,
-                NoEasOnFile = 0xc0000052,
-                EaCorruptError = 0xc0000053,
-                FileLockConflict = 0xc0000054,
-                LockNotGranted = 0xc0000055,
-                DeletePending = 0xc0000056,
-                CtlFileNotSupported = 0xc0000057,
-                UnknownRevision = 0xc0000058,
-                RevisionMismatch = 0xc0000059,
-                InvalidOwner = 0xc000005a,
-                InvalidPrimaryGroup = 0xc000005b,
-                NoImpersonationToken = 0xc000005c,
-                CantDisableMandatory = 0xc000005d,
-                NoLogonServers = 0xc000005e,
-                NoSuchLogonSession = 0xc000005f,
-                NoSuchPrivilege = 0xc0000060,
-                PrivilegeNotHeld = 0xc0000061,
-                InvalidAccountName = 0xc0000062,
-                UserExists = 0xc0000063,
-                NoSuchUser = 0xc0000064,
-                GroupExists = 0xc0000065,
-                NoSuchGroup = 0xc0000066,
-                MemberInGroup = 0xc0000067,
-                MemberNotInGroup = 0xc0000068,
-                LastAdmin = 0xc0000069,
-                WrongPassword = 0xc000006a,
-                IllFormedPassword = 0xc000006b,
-                PasswordRestriction = 0xc000006c,
-                LogonFailure = 0xc000006d,
-                AccountRestriction = 0xc000006e,
-                InvalidLogonHours = 0xc000006f,
-                InvalidWorkstation = 0xc0000070,
-                PasswordExpired = 0xc0000071,
-                AccountDisabled = 0xc0000072,
-                NoneMapped = 0xc0000073,
-                TooManyLuidsRequested = 0xc0000074,
-                LuidsExhausted = 0xc0000075,
-                InvalidSubAuthority = 0xc0000076,
-                InvalidAcl = 0xc0000077,
-                InvalidSid = 0xc0000078,
-                InvalidSecurityDescr = 0xc0000079,
-                ProcedureNotFound = 0xc000007a,
-                InvalidImageFormat = 0xc000007b,
-                NoToken = 0xc000007c,
-                BadInheritanceAcl = 0xc000007d,
-                RangeNotLocked = 0xc000007e,
-                DiskFull = 0xc000007f,
-                ServerDisabled = 0xc0000080,
-                ServerNotDisabled = 0xc0000081,
-                TooManyGuidsRequested = 0xc0000082,
-                GuidsExhausted = 0xc0000083,
-                InvalidIdAuthority = 0xc0000084,
-                AgentsExhausted = 0xc0000085,
-                InvalidVolumeLabel = 0xc0000086,
-                SectionNotExtended = 0xc0000087,
-                NotMappedData = 0xc0000088,
-                ResourceDataNotFound = 0xc0000089,
-                ResourceTypeNotFound = 0xc000008a,
-                ResourceNameNotFound = 0xc000008b,
-                ArrayBoundsExceeded = 0xc000008c,
-                FloatDenormalOperand = 0xc000008d,
-                FloatDivideByZero = 0xc000008e,
-                FloatInexactResult = 0xc000008f,
-                FloatInvalidOperation = 0xc0000090,
-                FloatOverflow = 0xc0000091,
-                FloatStackCheck = 0xc0000092,
-                FloatUnderflow = 0xc0000093,
-                IntegerDivideByZero = 0xc0000094,
-                IntegerOverflow = 0xc0000095,
-                PrivilegedInstruction = 0xc0000096,
-                TooManyPagingFiles = 0xc0000097,
-                FileInvalid = 0xc0000098,
-                InstanceNotAvailable = 0xc00000ab,
-                PipeNotAvailable = 0xc00000ac,
-                InvalidPipeState = 0xc00000ad,
-                PipeBusy = 0xc00000ae,
-                IllegalFunction = 0xc00000af,
-                PipeDisconnected = 0xc00000b0,
-                PipeClosing = 0xc00000b1,
-                PipeConnected = 0xc00000b2,
-                PipeListening = 0xc00000b3,
-                InvalidReadMode = 0xc00000b4,
-                IoTimeout = 0xc00000b5,
-                FileForcedClosed = 0xc00000b6,
-                ProfilingNotStarted = 0xc00000b7,
-                ProfilingNotStopped = 0xc00000b8,
-                NotSameDevice = 0xc00000d4,
-                FileRenamed = 0xc00000d5,
-                CantWait = 0xc00000d8,
-                PipeEmpty = 0xc00000d9,
-                CantTerminateSelf = 0xc00000db,
-                InternalError = 0xc00000e5,
-                InvalidParameter1 = 0xc00000ef,
-                InvalidParameter2 = 0xc00000f0,
-                InvalidParameter3 = 0xc00000f1,
-                InvalidParameter4 = 0xc00000f2,
-                InvalidParameter5 = 0xc00000f3,
-                InvalidParameter6 = 0xc00000f4,
-                InvalidParameter7 = 0xc00000f5,
-                InvalidParameter8 = 0xc00000f6,
-                InvalidParameter9 = 0xc00000f7,
-                InvalidParameter10 = 0xc00000f8,
-                InvalidParameter11 = 0xc00000f9,
-                InvalidParameter12 = 0xc00000fa,
-                MappedFileSizeZero = 0xc000011e,
-                TooManyOpenedFiles = 0xc000011f,
-                Cancelled = 0xc0000120,
-                CannotDelete = 0xc0000121,
-                InvalidComputerName = 0xc0000122,
-                FileDeleted = 0xc0000123,
-                SpecialAccount = 0xc0000124,
-                SpecialGroup = 0xc0000125,
-                SpecialUser = 0xc0000126,
-                MembersPrimaryGroup = 0xc0000127,
-                FileClosed = 0xc0000128,
-                TooManyThreads = 0xc0000129,
-                ThreadNotInProcess = 0xc000012a,
-                TokenAlreadyInUse = 0xc000012b,
-                PagefileQuotaExceeded = 0xc000012c,
-                CommitmentLimit = 0xc000012d,
-                InvalidImageLeFormat = 0xc000012e,
-                InvalidImageNotMz = 0xc000012f,
-                InvalidImageProtect = 0xc0000130,
-                InvalidImageWin16 = 0xc0000131,
-                LogonServer = 0xc0000132,
-                DifferenceAtDc = 0xc0000133,
-                SynchronizationRequired = 0xc0000134,
-                DllNotFound = 0xc0000135,
-                IoPrivilegeFailed = 0xc0000137,
-                OrdinalNotFound = 0xc0000138,
-                EntryPointNotFound = 0xc0000139,
-                ControlCExit = 0xc000013a,
-                PortNotSet = 0xc0000353,
-                DebuggerInactive = 0xc0000354,
-                CallbackBypass = 0xc0000503,
-                PortClosed = 0xc0000700,
-                MessageLost = 0xc0000701,
-                InvalidMessage = 0xc0000702,
-                RequestCanceled = 0xc0000703,
-                RecursiveDispatch = 0xc0000704,
-                LpcReceiveBufferExpected = 0xc0000705,
-                LpcInvalidConnectionUsage = 0xc0000706,
-                LpcRequestsNotAllowed = 0xc0000707,
-                ResourceInUse = 0xc0000708,
-                ProcessIsProtected = 0xc0000712,
-                VolumeDirty = 0xc0000806,
-                FileCheckedOut = 0xc0000901,
-                CheckOutRequired = 0xc0000902,
-                BadFileType = 0xc0000903,
-                FileTooLarge = 0xc0000904,
-                FormsAuthRequired = 0xc0000905,
-                VirusInfected = 0xc0000906,
-                VirusDeleted = 0xc0000907,
-                TransactionalConflict = 0xc0190001,
-                InvalidTransaction = 0xc0190002,
-                TransactionNotActive = 0xc0190003,
-                TmInitializationFailed = 0xc0190004,
-                RmNotActive = 0xc0190005,
-                RmMetadataCorrupt = 0xc0190006,
-                TransactionNotJoined = 0xc0190007,
-                DirectoryNotRm = 0xc0190008,
-                CouldNotResizeLog = 0xc0190009,
-                TransactionsUnsupportedRemote = 0xc019000a,
-                LogResizeInvalidSize = 0xc019000b,
-                RemoteFileVersionMismatch = 0xc019000c,
-                CrmProtocolAlreadyExists = 0xc019000f,
-                TransactionPropagationFailed = 0xc0190010,
-                CrmProtocolNotFound = 0xc0190011,
-                TransactionSuperiorExists = 0xc0190012,
-                TransactionRequestNotValid = 0xc0190013,
-                TransactionNotRequested = 0xc0190014,
-                TransactionAlreadyAborted = 0xc0190015,
-                TransactionAlreadyCommitted = 0xc0190016,
-                TransactionInvalidMarshallBuffer = 0xc0190017,
-                CurrentTransactionNotValid = 0xc0190018,
-                LogGrowthFailed = 0xc0190019,
-                ObjectNoLongerExists = 0xc0190021,
-                StreamMiniversionNotFound = 0xc0190022,
-                StreamMiniversionNotValid = 0xc0190023,
-                MiniversionInaccessibleFromSpecifiedTransaction = 0xc0190024,
-                CantOpenMiniversionWithModifyIntent = 0xc0190025,
-                CantCreateMoreStreamMiniversions = 0xc0190026,
-                HandleNoLongerValid = 0xc0190028,
-                NoTxfMetadata = 0xc0190029,
-                LogCorruptionDetected = 0xc0190030,
-                CantRecoverWithHandleOpen = 0xc0190031,
-                RmDisconnected = 0xc0190032,
-                EnlistmentNotSuperior = 0xc0190033,
-                RecoveryNotNeeded = 0xc0190034,
-                RmAlreadyStarted = 0xc0190035,
-                FileIdentityNotPersistent = 0xc0190036,
-                CantBreakTransactionalDependency = 0xc0190037,
-                CantCrossRmBoundary = 0xc0190038,
-                TxfDirNotEmpty = 0xc0190039,
-                IndoubtTransactionsExist = 0xc019003a,
-                TmVolatile = 0xc019003b,
-                RollbackTimerExpired = 0xc019003c,
-                TxfAttributeCorrupt = 0xc019003d,
-                EfsNotAllowedInTransaction = 0xc019003e,
-                TransactionalOpenNotAllowed = 0xc019003f,
-                TransactedMappingUnsupportedRemote = 0xc0190040,
-                TxfMetadataAlreadyPresent = 0xc0190041,
-                TransactionScopeCallbacksNotSet = 0xc0190042,
-                TransactionRequiredPromotion = 0xc0190043,
-                CannotExecuteFileInTransaction = 0xc0190044,
-                TransactionsNotFrozen = 0xc0190045,
-
-                MaximumNtStatus = 0xffffffff
-            }
+            tokenHandle.Dispose();
         }
     }
 }

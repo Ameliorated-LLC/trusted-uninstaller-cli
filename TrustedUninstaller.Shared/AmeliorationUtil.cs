@@ -8,6 +8,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Runtime.Serialization;
 using System.ServiceProcess;
 using System.Text;
 using System.Threading;
@@ -15,16 +16,27 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Xml;
 using System.Xml.Serialization;
+using Core;
+using Core.Actions;
+using Core.Exceptions;
+using Interprocess;
+using JetBrains.Annotations;
+using Microsoft.Win32;
 using TrustedUninstaller.Shared.Actions;
+using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Parser;
 using TrustedUninstaller.Shared.Tasks;
+using YamlDotNet.Core;
+using YamlDotNet.Serialization;
+using RegistryKeyAction = TrustedUninstaller.Shared.Actions.RegistryKeyAction;
+using TaskAction = TrustedUninstaller.Shared.Tasks.TaskAction;
+using UninstallTaskStatus = TrustedUninstaller.Shared.Tasks.UninstallTaskStatus;
 
 namespace TrustedUninstaller.Shared
 {
 
     public static class AmeliorationUtil
     {
-        private static readonly ConfigParser Parser = new ConfigParser();
 
         private static readonly HttpClient Client = new HttpClient();
 
@@ -34,185 +46,75 @@ namespace TrustedUninstaller.Shared
 
         public static readonly List<string> ErrorDisplayList = new List<string>();
 
-        public static int GetProgressMaximum(List<string> options)
-        {
-            return Parser.Tasks.Sum(task => task.Actions.Sum(action =>
-            {
-                var taskAction = (TaskAction)action;
-                if ((!IsApplicableOption(taskAction.Option, options) || !IsApplicableArch(taskAction.Arch)) ||
-                    (taskAction.Builds != null && (
-                        !taskAction.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
-                        ||
-                        taskAction.Builds.Where(build => build.StartsWith("!")).Any(build => !IsApplicableWindowsVersion(build)))) ||
-                    (taskAction.Options != null && (
-                        !taskAction.Options.Where(option => !option.StartsWith("!")).Any(option => IsApplicableOption(option, Playbook.Options))
-                        ||
-                        taskAction.Options.Where(option => option.StartsWith("!")).Any(option => !IsApplicableOption(option, Playbook.Options)))))
-                {
-                    return 0;
-                }
+        public static int GetProgressMaximum(List<ITaskAction> actions) => actions.Sum(action => action.GetProgressWeight());
 
-                return action.GetProgressWeight();
-            }));
+        private static bool IsApplicable([CanBeNull] Playbook upgradingFrom, bool? onUpgrade, [CanBeNull] string[] onUpgradeVersions, [CanBeNull] string option)
+        {
+            if (upgradingFrom == null)
+                return !onUpgrade.GetValueOrDefault();
+
+            bool isApplicable = true;
+            bool? versionApplicable = null;
+            if (onUpgradeVersions != null)
+            {
+                if (onUpgrade == null)
+                    throw new YamlException("onUpgrade must be defined when using onUpgradeVersions");
+
+                versionApplicable = 
+                    onUpgradeVersions.Where(version => !version.StartsWith("!")).Any(version => IsApplicableUpgrade(upgradingFrom.Version, version))
+                    &&
+                    onUpgradeVersions.Where(version => version.StartsWith("!")).All(version => IsApplicableUpgrade(upgradingFrom.Version, version));
+                isApplicable = versionApplicable.Value;
+            }
+
+            if (onUpgrade == null)
+                return true;
+
+            if (isApplicable && option != null)
+            {
+                isApplicable = String.Equals(option.Trim(), "ignore", StringComparison.OrdinalIgnoreCase) ||
+                    (!(upgradingFrom.AvailableOptions?.Contains(option) ?? false) || (upgradingFrom.SelectedOptions?.Contains(option) ?? false));
+            }
+            
+            if (upgradingFrom.GetVersionNumber() == Playbook.GetVersionNumber() && (versionApplicable == null || !onUpgradeVersions.Any(x => x.Equals(Playbook.Version))))
+                return !onUpgrade.Value && !isApplicable;
+
+            return onUpgrade.Value ? isApplicable : !isApplicable;
         }
         
-        public static bool AddTasks(string configPath, string file)
+        [CanBeNull]
+        public static List<ITaskAction> ParseActions(string configPath, List<string> options, string file, [CanBeNull] Playbook upgradingFrom)
         {
+            var returnExceptionMessage = string.Empty;
             try
             {
-                //This allows for a proper detection of if any error occurred, and if so the CLI will relay an :AME-Fatal Error:
-                //This is important, as we want the process to stop immediately if a YAML syntax error was detected.
-                bool hadError = false;
+                if (!File.Exists(Path.Combine(configPath, file)))
+                    return null;
                 
-                //Adds the config file to the parser's task list
-                Parser.Add(Path.Combine(configPath, file));
+                var configData = File.ReadAllText(Path.Combine(configPath, file));
+                var task = PlaybookParser.Deserializer.Deserialize<UninstallTask>(configData);
 
-                var currentTask = Parser.Tasks[Parser.Tasks.Count - 1];
-
-                if ((!IsApplicableOption(currentTask.Option, Playbook.Options) || !IsApplicableArch(currentTask.Arch)) ||
-                    (currentTask.Builds != null && (
-                        !currentTask.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
+                if ((!IsApplicable(upgradingFrom, task.OnUpgrade, task.OnUpgradeVersions, task.PreviousOption ?? task.Option) || 
+                        !IsApplicableOption(task.Option, Playbook.Options) || !IsApplicableArch(task.Arch)) ||
+                    (task.Builds != null && (
+                        !task.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
                         ||
-                        currentTask.Builds.Where(build => build.StartsWith("!")).Any(build => !IsApplicableWindowsVersion(build)))) ||
-                    (currentTask.Options != null && (
-                        !currentTask.Options.Where(option => !option.StartsWith("!")).Any(option => IsApplicableOption(option, Playbook.Options))
+                        task.Builds.Where(build => build.StartsWith("!")).Any(build => !IsApplicableWindowsVersion(build)))) ||
+                    (task.Options != null && (
+                        !task.Options.Where(option => !option.StartsWith("!")).Any(option => IsApplicableOption(option, Playbook.Options))
                         ||
-                        currentTask.Options.Where(option => option.StartsWith("!")).Any(option => !IsApplicableOption(option, Playbook.Options)))))
+                        task.Options.Where(option => option.StartsWith("!")).Any(option => !IsApplicableOption(option, Playbook.Options)))))
                 {
-                    Parser.Tasks.Remove(currentTask);
-                    return true;
+                    return null;
                 }
-                    
-
-                //Get the features of the last added task (the task that was just added from the config file)
-                var features = currentTask.Features;
                 
-                //Each feature would reference a directory that has a YAML file, we take those directories and then run the
-                //AddTasks function again, until we reach a file that doesn't reference any other YAML files, and add them
-                //all to the parser's tasks list.
-                if (features == null) return true;
-                foreach (var feature in features)
+                var list = new List<ITaskAction>();
+
+                // ReSharper disable once PossibleInvalidCastExceptionInForeachLoop
+                foreach (Tasks.TaskAction taskAction in task.Actions)
                 {
-                    var subResult = AddTasks(configPath, feature);
-                    
-                    // We could return false here, however we want to output ALL detected YAML errors,
-                    // which is why we continue here.
-                    if (!subResult) hadError = true;
-                }
-
-                return hadError ? false : true;
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine($"Error adding tasks in {configPath + "\\" + file}:\r\n{e.Message}");
-                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, $"Error adding tasks in {configPath + "\\" + file}.");
-                return false;
-            }
-        }
-        public static async Task<int> DoActions(UninstallTask task, UninstallTaskPrivilege privilege)
-        {
-            try
-            {
-                //If the privilege is admin and the program is running as TI, do not do the action.
-                //if (privilege == UninstallTaskPrivilege.Admin && WinUtil.IsTrustedInstaller())
-                //{
-                //    return 0;
-                //}
-                
-                if (!WinUtil.IsTrustedInstaller())
-                {
-                    Console.WriteLine("Relaunching as Trusted Installer!");
-                    
-                    var mmf = MemoryMappedFile.CreateNew("ImgA", 30000000);
-                    WinUtil.RelaunchAsTrustedInstaller();
-                    if (NativeProcess.Process == null)
-                    {
-                        ErrorLogger.WriteToErrorLog($"Could not launch TrustedInstaller process. Return output was null.",
-                            Environment.StackTrace, "Error while attempting to sync with TrustedInstaller process.");
-                        
-                        Console.WriteLine(":AME-Fatal Error: Could not launch TrustedInstaller process.");
-                        Environment.Exit(-1);
-                    }
-                    
-                    var delay = 20;
-                    while (!NativeProcess.Process.HasExited)
-                    {
-                        if (delay > 3500)
-                        {
-                            NativeProcess.Process.Kill();
-                            
-                            ErrorLogger.WriteToErrorLog($"Could not initialize memory data exchange. Timeframe exceeded.",
-                                Environment.StackTrace, "Error while attempting to sync with TrustedInstaller process.");
-                            
-                            Console.WriteLine(":AME-Fatal Error: Could not initialize memory data exchange.");
-                            Environment.Exit(-1);
-                        }
-
-                        Task.Delay(delay).Wait();
-                        // Kind of inefficient looping this, however it's likely to cause access errors otherwise
-                        using var stream = mmf.CreateViewStream();
-                        using BinaryReader binReader = new BinaryReader(stream);
-                        {
-                            var res = binReader.ReadBytes((int)stream.Length);
-                            var data = Encoding.UTF8.GetString(res);
-
-                            var end = data.IndexOf('\0');
-                            if (end == 0)
-                            {
-                                delay += 200;
-                            }
-                            else
-                            {
-                                break;
-                            }
-                        }
-                    }
-                    
-                    var offset = 0;
-                    var read = false;
-                    using (var stream = mmf.CreateViewStream())
-                    {
-                        while (!NativeProcess.Process.HasExited || read)
-                        {
-                            read = false;
-                            
-                            BinaryReader binReader = new BinaryReader(stream);
-
-                            binReader.BaseStream.Seek(offset, SeekOrigin.Begin);
-
-                            var res = binReader.ReadBytes((int)stream.Length - offset);
-                            var data = Encoding.UTF8.GetString(res);
-
-                            var end = data.IndexOf("\0");
-
-                            var content = data.Substring(0, end);
-                            offset += Encoding.UTF8.GetBytes(content).Length;
-
-                            var output = content.Split(new [] {Environment.NewLine}, StringSplitOptions.None);
-                            if (output.Length > 0) output = output.Take(output.Length - 1).ToArray();
-                            
-                            foreach (var line in output)
-                            {
-                                Console.WriteLine(line);
-                                read = true;
-                                // Introducing ANY delay here makes it lag behind, which isn't ideal
-                                //Task.Delay(5).Wait();
-                            }
-                            Task.Delay(20).Wait();
-                        }
-                    }
-                    mmf.Dispose();
-                    return 0; //Only returns after TI is done
-                }
-
-                //Goes through the list of tasks that are inside the parser class,
-                //and runs the task using the RunTask method
-                //Check the Actions folder inside the Shared folder for reference.
-                foreach (ITaskAction action in task.Actions)
-                {
-                    var taskAction = (TaskAction)action;
-
-                    if ((!IsApplicableOption(taskAction.Option, Playbook.Options) || !IsApplicableArch(taskAction.Arch)) ||
+                    if ((!IsApplicable(upgradingFrom, taskAction.OnUpgrade, taskAction.OnUpgradeVersions, taskAction.PreviousOption ?? taskAction.Option) || 
+                            !IsApplicableOption(taskAction.Option, options) || !IsApplicableArch(taskAction.Arch)) ||
                         (taskAction.Builds != null && (
                             !taskAction.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
                             ||
@@ -225,83 +127,274 @@ namespace TrustedUninstaller.Shared
                         continue;
                     }
                     
-                    int i = 0;
+                    if (taskAction is Actions.TaskAction taskTaskAction)
+                    {
+                        if (!File.Exists(Path.Combine(configPath, taskTaskAction.Path)))
+                            throw new FileNotFoundException("Could not find YAML file: " + taskTaskAction.Path);
+                        try
+                        {
+                            list.AddRange(ParseActions(configPath, options, taskTaskAction.Path, upgradingFrom) ?? new List<ITaskAction>());
+                        }
+                        catch (Exception e)
+                        {
+                            if (e is SerializationException exception)
+                                returnExceptionMessage += exception.Message + Environment.NewLine + Environment.NewLine;
+                            else
+                                throw;
+                        }
+                    }
+                    else
+                    {
+                        list.Add((ITaskAction)taskAction);
+                    }
+                }
 
-                    //var actionType = action.GetType().ToString().Replace("TrustedUninstaller.Shared.Actions.", "");
-
+                foreach (var childTask in task.Tasks)
+                {
+                    if (!File.Exists(Path.Combine(configPath, childTask)))
+                        throw new FileNotFoundException("Could not find YAML file: " + childTask);
                     try
                     {
-                        do
-                        {
-                            //Console.WriteLine($"Running {actionType}");
-                            Console.WriteLine();
-                            try
-                            {
-                                var actionTask = action.RunTask();
-                                if (actionTask == null)
-                                    action.RunTaskOnMainThread();
-                                else await actionTask;
-                                action.ResetProgress();
-                            }
-                            catch (Exception e)
-                            {
-                                action.ResetProgress();
-                                if (e.InnerException != null)
-                                {
-                                    ErrorLogger.WriteToErrorLog(e.InnerException.Message, e.InnerException.StackTrace, e.Message);
-                                }
-                                else
-                                {
-                                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, action.ErrorString());
-                                    List<string> ExceptionBreakList = new List<string>() { "System.ArgumentException", "System.SecurityException", "System.UnauthorizedAccessException", "System.TimeoutException" };
-                                    if (ExceptionBreakList.Any(x => x.Equals(e.GetType().ToString())))
-                                    {
-                                        i = 10;
-                                        break;
-                                    } 
-                                }
-                                Thread.Sleep(300);
-                            }
-                            Console.WriteLine($"Status: {action.GetStatus()}");
-                            if (i > 0) Thread.Sleep(50);
-                            i++;
-                        } while (action.GetStatus() != UninstallTaskStatus.Completed && i < 10);
+                        list.AddRange(ParseActions(configPath, options, childTask, upgradingFrom) ?? new List<ITaskAction>());
                     }
                     catch (Exception e)
                     {
-                        ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Critical error while running action.");
-                        if (!((TaskAction)action).IgnoreErrors)
-                            Console.WriteLine($":AME-ERROR: Critical error while running action: " + e.Message);
+                        if (e is SerializationException exception)
+                            returnExceptionMessage += exception.Message + Environment.NewLine + Environment.NewLine;
+                        else
+                            throw;
                     }
-
-                    if (i == 10)
-                    {
-                        var errorString = action.ErrorString();
-                        ErrorLogger.WriteToErrorLog(errorString, Environment.StackTrace, "Action failed to complete.");
-                        // AmeliorationUtil.ErrorDisplayList.Add(errorString) would NOT work here since this
-                        // might be a separate process, and thus has to be forwarded via the console
-                        if (!((TaskAction)action).IgnoreErrors)
-                            Console.WriteLine($":AME-ERROR: {errorString}");
-                        //Environment.Exit(-2);
-                        Console.WriteLine($"Action completed. Weight:{action.GetProgressWeight()}");
-                        continue;
-                    }
-                    Console.WriteLine($"Action completed. Weight:{action.GetProgressWeight()}");
                 }
-                Console.WriteLine("Task completed.");
-                
-                ProcessPrivilege.ResetTokens();
-            }
-            catch (Exception e)
-            {
-                ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace,
-                    "Encountered an error while doing task actions.");
-            }
 
-            return 0;
+                if (!string.IsNullOrEmpty(returnExceptionMessage))
+                    throw new SerializationException(returnExceptionMessage.TrimEnd('\n', '\r'));
+
+                return list;
+            }
+            catch (YamlException e)
+            {
+                var faultyText = Wrap.ExecuteSafe(() => GetFaultyYamlText(Path.Combine(configPath, file), e), true);
+                if (faultyText.Failed || string.IsNullOrWhiteSpace(faultyText.Value))
+                {
+                    Log.EnqueueExceptionSafe(e);
+                    throw new SerializationException(e.Message.TrimEnd('.') + $" in {Path.GetFileName(file)}.");
+                }
+                else
+                {
+                    Log.EnqueueExceptionSafe(e, ("YAML", faultyText.Value));
+                    throw new SerializationException(FilterYAMLMessage(e).TrimEnd('.') + $" in {Path.GetFileName(file)}:{Environment.NewLine}{faultyText.Value}");
+                }
+            }
+        }
+        
+        public static string GetFaultyYamlText(string yamlFilePath, YamlException yamlEx)
+        {
+            using (var reader = new StreamReader(yamlFilePath))
+            {
+                int currentLine = 0;
+                StringBuilder sb = new StringBuilder();
+
+                while (!reader.EndOfStream)
+                {
+                    currentLine++;
+                    string line = reader.ReadLine();
+                    if (line == null)
+                        throw new IndexOutOfRangeException();
+
+                    var prefix = $"Line {currentLine}: ";
+                    if (currentLine == yamlEx.Start.Line)
+                    {
+                        if (yamlEx.Start.Line == yamlEx.End.Line)
+                        {
+                            int endIndexInLine = yamlEx.End.Column - Math.Max(0, yamlEx.Start.Column - 1);
+                            var text = line.Substring(Math.Max(0, yamlEx.Start.Column - 1), endIndexInLine);
+                            if (text.Length <= 1 || string.IsNullOrWhiteSpace(text))
+                                text = line;
+
+                            text = string.Join(Environment.NewLine + prefix.Length, text.SplitByLength(25).Select(x => x.Trim()));
+
+                            sb.Append(prefix + text);
+                            break;
+                        }
+                        else
+                        {
+                            var text = line.Substring(Math.Max(0, yamlEx.Start.Column - 1));
+                            text = string.Join(Environment.NewLine + prefix.Length, text.SplitByLength(25).Select(x => x.Trim()));
+                            sb.Append(prefix + text);
+                        }
+                    }
+                    else if (currentLine > yamlEx.Start.Line && currentLine < yamlEx.End.Line)
+                    {
+                        var text = string.Join(Environment.NewLine + prefix.Length, line.SplitByLength(25).Select(x => x.Trim()));
+                        sb.Append(Environment.NewLine).Append(prefix + text);
+                    } else if (currentLine == yamlEx.End.Line)
+                    {
+                        var text = string.Join(Environment.NewLine + prefix.Length, line.Substring(0, yamlEx.End.Column).SplitByLength(25).Select(x => x.Trim()));
+                        sb.Append(Environment.NewLine).Append(prefix + text);
+                        break;
+                    }
+                }
+
+                var faultyText = sb.ToString();
+                return faultyText;
+            }
+        }
+        private static string FilterYAMLMessage(YamlException exception)
+        {
+            int count = 0;
+            int i = 0;
+
+            for (; i < exception.Message.Length; i++)
+            {
+                if (exception.Message[i] == '(')
+                    ++count;
+                else if (exception.Message[i] == ')')
+                    --count;
+
+                if (exception.Message.Length >= i + 1 + 3 && exception.Message.Substring(i + 1, 3) == " - ")
+                {
+                    i += 3;
+                    continue;
+                }
+                if (count == 0)
+                    return exception.Message.Substring(i + 1).Trim().TrimStart(':', ' ');
+            }
+            throw new UnexpectedException();
         }
 
-        public static Task<Playbook> DeserializePlaybook(string dir)
+        public static async Task<bool> DoActions(List<ITaskAction> actions, string logFolder, Action<int> progressReport)
+        {
+            bool errorOccurred = false;
+            foreach (ITaskAction action in actions)
+            {
+                var actionName = action.GetType().ToString().Split('.').Last();
+                using var writer = new Output.OutputWriter(actionName.Replace("Action", ""), Path.Combine(logFolder, "Output.txt"), Path.Combine(logFolder, "Log.yml"));
+                writer.LogOptions.SourceOverride = actionName;
+
+                ErrorAction errorAction = ((Tasks.TaskAction)action).ErrorAction ?? action.GetDefaultErrorAction();
+                var errorString = action.ErrorString();
+                var retryAllowed = ((Tasks.TaskAction)action).AllowRetries ?? action.GetRetryAllowed();
+                
+                int i = 0;
+                try
+                {
+                    do
+                    {
+                        if (i > 0)
+                            writer.WriteLineSafe("Warning", "Action detected as unsuccessful. Retrying...");
+                        try
+                        {
+                            var actionTask = action.RunTask(writer);
+                            if (actionTask == null)
+                                action.RunTaskOnMainThread(writer);
+                            else await actionTask;
+                            action.ResetProgress();
+                        }
+                        catch (Exception e)
+                        {
+                            action.ResetProgress();
+
+                            if (e is ErrorHandlingException errorHandlingException)
+                            {
+                                if (errorHandlingException.Action == TaskAction.ExitCodeAction.Retry || errorHandlingException.Action == TaskAction.ExitCodeAction.RetryError)
+                                {
+                                    errorString = errorHandlingException.Message;
+                                    Thread.Sleep(50);
+                                    i += 2;
+                                    if (i == 10)
+                                    {
+                                        if (errorHandlingException.Action == TaskAction.ExitCodeAction.Retry)
+                                        {
+                                            i = 0;
+                                            break;
+                                        }
+                                        if (errorHandlingException.Action == TaskAction.ExitCodeAction.RetryError)
+                                        {
+                                            i = 0;
+                                            Log.WriteExceptionSafe(e, errorHandlingException.Message, new Log.LogOptions(writer));
+                                            errorOccurred = true;
+                                            break;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                errorAction = errorHandlingException.Action switch
+                                {
+                                    TaskAction.ExitCodeAction.Log => ErrorAction.Log,
+                                    TaskAction.ExitCodeAction.Error => ErrorAction.Notify,
+                                    TaskAction.ExitCodeAction.Halt => ErrorAction.Halt,
+                                    _ => ErrorAction.Log
+                                };
+
+                                errorString = errorHandlingException.Message;
+                                ((Tasks.TaskAction)action).IgnoreErrors = false;
+                                i = 10;
+                                break;
+                            }
+
+                            Log.WriteExceptionSafe(e, null, new Log.LogOptions(writer));
+                            
+                            List<string> ExceptionBreakList = new List<string>() { "System.ArgumentException", "System.SecurityException", "System.UnauthorizedAccessException", "System.TimeoutException" };
+                            if (ExceptionBreakList.Any(x => x.Equals(e.GetType().ToString())) || !retryAllowed)
+                            {
+                                i = 10;
+                                break;
+                            }
+                            Thread.Sleep(300);
+                        }
+
+                        if (i > 0) Thread.Sleep(50);
+                        i++;
+                        
+                        if (action.GetStatus(writer) == UninstallTaskStatus.Completed)
+                            break;
+                    } while (i < 10);
+                }
+                catch (Exception e)
+                {
+                    if (!((Tasks.TaskAction)action).IgnoreErrors)
+                    {
+                        if (errorAction == ErrorAction.Log)
+                            Log.WriteExceptionSafe(LogType.Info, e, "An ignored error occurred while running an action.", new Log.LogOptions(writer));
+                        if (errorAction == ErrorAction.Notify)
+                        {
+                            Log.WriteExceptionSafe(e, "An error occurred while running an action.", new Log.LogOptions(writer));
+                            errorOccurred = true;
+                        }
+                        if (errorAction == ErrorAction.Halt)
+                        {
+                            Log.WriteExceptionSafe(LogType.Critical, e, "Playbook halted due to a failed critical action.", new Log.LogOptions(writer));
+                            throw e;
+                        }
+                    }
+                }
+                
+                progressReport(action.GetProgressWeight());
+                if (i == 10)
+                {
+                    if (!((Tasks.TaskAction)action).IgnoreErrors)
+                    {
+                        if (errorAction == ErrorAction.Log)
+                            Log.WriteSafe(LogType.Info, errorString, null, new Log.LogOptions(writer));
+                        if (errorAction == ErrorAction.Notify)
+                        {
+                            Log.WriteSafe(LogType.Error, errorString, null, new Log.LogOptions(writer));
+                            errorOccurred = true;
+                        }
+                        if (errorAction == ErrorAction.Halt)
+                        {
+                            Log.WriteSafe(LogType.Critical, "Playbook halted due to a critical error: " + errorString, null, new Log.LogOptions(writer));
+                            throw new Exception("Critical error: " + errorString);
+                        }
+                    }
+                }
+            }
+
+            ProcessPrivilege.ResetTokens();
+            return errorOccurred;
+        }
+
+        public static Playbook DeserializePlaybook(string dir)
         {
             Playbook pb;
             
@@ -314,105 +407,97 @@ namespace TrustedUninstaller.Shared
             {
                 MessageBox.Show(args.Attr.Name);
             };*/
-            using (XmlReader reader = XmlReader.Create($"{dir}\\playbook.conf"))
+            try
             {
-                pb = (Playbook)serializer.Deserialize(reader);
-            }
-            var validateResult = pb.Validate();
-            if (validateResult != null)
-                throw new XmlException(validateResult);
-
-            if (File.Exists($"{dir}\\options.txt"))
-            {
-                pb.Options = new List<string>();
-                using (var reader = new StreamReader($"{dir}\\options.txt"))
+                using (XmlReader reader = XmlReader.Create($"{dir}\\playbook.conf"))
                 {
-                    while (!reader.EndOfStream)
-                        pb.Options.Add(reader.ReadLine());
+                    pb = (Playbook)serializer.Deserialize(reader);
                 }
             }
+            catch (InvalidOperationException e)
+            {
+                if (e.InnerException == null)
+                    throw;
+
+                throw new XmlException(e.Message.TrimEnd('.') + ": " + e.InnerException.Message);
+            }
+
             pb.Path = dir;
-            return Task.FromResult(pb);
+            return pb;
         }
 
-        public static async Task<int> StartAmelioration()
+        [Serializable]
+        public class PlaybookMetadata : Log.ILogMetadata
         {
-            //Needed after defender removal's reboot, the "current directory" will be set to System32
-            //After the auto start up.
-            Directory.SetCurrentDirectory(AppDomain.CurrentDomain.BaseDirectory);
-
-            if (Directory.Exists("Logs") && !WinUtil.IsTrustedInstaller())
+            public PlaybookMetadata(string[] options) => Options = options;
+         
+            public DateTime CreationTime { get; set; }
+            public string ClientVersion { get; set; }
+            public string WindowsVersion { get; set; }
+            public string UserLanguage { get; set; }
+            public Architecture Architecture { get; set; }
+            public string SystemMemory { get; set; }
+            public int SystemThreads { get; set; }
+            public string[] Options { get; set; }
+            public virtual void Construct()
             {
-                if (File.Exists("Logs\\AdminOutput.txt"))
-                {
-                    File.Delete("Logs\\AdminOutput.txt");
-                }
-
-                if (File.Exists("Logs\\TIOutput.txt"))
-                {
-                    File.Delete("Logs\\TIOutput.txt");
-                }
+                ClientVersion = Globals.CurrentVersion;
+                WindowsVersion = $"Windows {Win32.SystemInfoEx.WindowsVersion.MajorVersion} {Win32.SystemInfoEx.WindowsVersion.Edition} {Win32.SystemInfoEx.WindowsVersion.BuildNumber}.{Win32.SystemInfoEx.WindowsVersion.UpdateNumber}";
+                UserLanguage = CultureInfo.InstalledUICulture.ToString();
+                SystemMemory = StringUtils.HumanReadableBytes(Win32.SystemInfoEx.GetSystemMemoryInBytes());
+                SystemThreads = Environment.ProcessorCount;
+                Architecture = Win32.SystemInfoEx.SystemArchitecture;
+                CreationTime = DateTime.UtcNow;
             }
 
-            //Check if KPH is installed.
-            ServiceController service = ServiceController.GetDevices()
-                                            .FirstOrDefault(s => s.DisplayName == "KProcessHacker2");
-            if (service == null)
-            {
-                //Installs KPH
-                await WinUtil.RemoveProtectionAsync();
-            }
+            public string Serialize(ISerializer serializer) => serializer.Serialize(this);
+        }
+        
+        [InterprocessMethod(Level.TrustedInstaller)]
+        public static async Task<bool> RunPlaybook(string playbookPath, string[] options, string logFolder, InterLink.InterProgress progress, [CanBeNull] InterLink.InterMessageReporter statusReporter, bool useKernelDriver)
+        {
+            Log.LogFileOverride = Path.Combine(logFolder, "Log.yml");
+            Log.MetadataSource = new PlaybookMetadata(options);
 
-            var langsFile = Path.Combine($"{Playbook.Path}\\Configuration", "langs.txt");
-            //Download language packs that were selected by the user
-            if (!File.Exists(langsFile))
-            {
-                File.Create(langsFile);
-            }
+            AmeliorationUtil.UseKernelDriver = useKernelDriver;
 
-            //var langsSelected = File.ReadLines(langsFile);
+            AmeliorationUtil.Playbook = AmeliorationUtil.DeserializePlaybook(playbookPath);
+            AmeliorationUtil.Playbook.Options = options?.ToList();
 
-            //await DownloadLanguagesAsync(langsSelected);
-
-            //Start adding tasks from the top level configuration folder.
-            if (!AddTasks($"{Playbook.Path}\\Configuration", "custom.yml"))
-            {
-                Console.WriteLine($":AME-Fatal Error: Error adding tasks.");
-                Environment.Exit(1);
-            }
-
-            if (!Parser.Tasks.Any())
-            {
-                Console.Error.WriteLine($"Couldn't find any tasks.");
-                return -1;
-            }
-
-            //Sort the list based on the priority value.
-            if (Parser.Tasks.Any(x => x.Priority != Parser.Tasks.First().Priority))
-                Parser.Tasks.Sort(new TaskComparer());
-
-            bool launched = false;
-            foreach (var task in Parser.Tasks.Where(task => task.Actions.Count != 0))
-            {
-                try
-                {
-                    //if (prevPriv == UninstallTaskPrivilege.TrustedInstaller && task.Privilege == UninstallTaskPrivilege.TrustedInstaller && !WinUtil.IsTrustedInstaller())
-                    if (!WinUtil.IsTrustedInstaller() && launched)
-                    {
-                        continue;
-                    }
-                    launched = true;
-                    await DoActions(task, task.Privilege);
-                    //prevPriv = task.Privilege;
-                }
-                catch (Exception ex)
-                {
-                    ErrorLogger.WriteToErrorLog(ex.Message, ex.StackTrace, "Error during DoAction loop.");
-                }
-            }
-
-            if (WinUtil.IsTrustedInstaller()) return 0;
+            Playbook[] appliedPlaybooks = Playbook.GetAppliedPlaybooks();
+            Playbook upgradingFrom = Playbook.LastAppliedMatch(appliedPlaybooks);
+            if (upgradingFrom != null && (!Playbook.IsUpgradeApplicable(upgradingFrom.Version) && !(upgradingFrom.GetVersionNumber() <= Playbook.GetVersionNumber())))
+                upgradingFrom = null;
             
+            List<ITaskAction> actions = ParseActions($"{Playbook.Path}\\Configuration", AmeliorationUtil.Playbook.Options, File.Exists($"{Playbook.Path}\\Configuration\\main.yml")  ? "main.yml" :  "custom.yml", upgradingFrom);
+            if (actions == null)
+                throw new SerializationException("No applicable tasks were found in the Playbook.");
+            
+            if (UseKernelDriver)
+            {
+                //Check if KPH is installed.
+                ServiceController service = ServiceController.GetDevices()
+                    .FirstOrDefault(s => s.DisplayName == "KProcessHacker2");
+                if (service == null)
+                {
+                    //Installs KPH
+                    await WinUtil.RemoveProtectionAsync();
+                }
+            }
+
+            var totalProgress = Math.Max(AmeliorationUtil.GetProgressMaximum(actions), 1);
+            var progressLeft = totalProgress;
+            Action<int> progressReport = addition =>
+            {
+                progressLeft -= addition;
+                var progressValue = 1 - ((decimal)progressLeft / totalProgress);
+                progress.Report(progressValue * 100);
+            };
+
+            WriteStatusAction.StatusReporter = statusReporter;
+
+            bool errorOccurred = await DoActions(actions, logFolder, progressReport);
+
             WinUtil.RegistryManager.UnhookUserHives();
 
             //Check if the kernel driver is installed.
@@ -423,16 +508,13 @@ namespace TrustedUninstaller.Shared
                 //Remove Process Hacker's kernel driver.
                 await WinUtil.UninstallDriver();
                 
-                await AmeliorationUtil.SafeRunAction(new RegistryKeyAction()
+                CoreActions.SafeRun(new Core.Actions.RegistryKeyAction()
                 {
                     KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\KProcessHacker2",
                 });
             }
-            
-            Console.WriteLine();
-            Console.WriteLine("Playbook finished.");
-            
-            return 0;
+
+            return errorOccurred;
         }
         public static async Task DownloadLanguagesAsync(IEnumerable<string> langsSelected)
         {
@@ -605,6 +687,52 @@ namespace TrustedUninstaller.Shared
             }
         }
 
+        private static bool IsApplicableUpgrade(string oldVersion, string allowedVersion)
+        {
+            var oldVersionNumber = Playbook.GetVersionNumber(oldVersion);
+            var version = allowedVersion;
+            bool negative = false;
+            if (version.StartsWith("!"))
+            {
+                version = version.TrimStart('!');
+                negative = true;
+            }
+            bool result = false;
+
+            if (version.StartsWith(">="))
+            {
+                var parsed = Playbook.GetVersionNumber(version.Substring(2));
+                if (oldVersionNumber >= parsed)
+                    result = true;
+            }
+            else if (version.StartsWith("<="))
+            {
+                var parsed = Playbook.GetVersionNumber(version.Substring(2));
+                if (oldVersionNumber <= parsed)
+                    result = true;
+            }
+            else if (version.StartsWith(">"))
+            {
+                var parsed = Playbook.GetVersionNumber(version.Substring(1));
+                if (oldVersionNumber > parsed)
+                    result = true;
+            }
+            else if (version.StartsWith("<"))
+            {
+                var parsed = Playbook.GetVersionNumber(version.Substring(1));
+                if (oldVersionNumber < parsed)
+                    result = true;
+            }
+            else
+            {
+                var parsed = Playbook.GetVersionNumber(version);
+                if (oldVersionNumber == parsed)
+                    result = true;
+            }
+
+            return negative ? !result : result;
+        }
+        
         private static bool IsApplicableWindowsVersion(string version)
         {
             bool negative = false;
@@ -613,35 +741,38 @@ namespace TrustedUninstaller.Shared
                 version = version.TrimStart('!');
                 negative = true;
             }
+            bool result = false;
 
             bool compareUpdateBuild = version.Contains(".");
-            var currentBuild = decimal.Parse(compareUpdateBuild ? Globals.WinVer + "." + Globals.WinUpdateVer : Globals.WinVer.ToString());
+            var currentBuild = decimal.Parse(compareUpdateBuild ? Win32.SystemInfoEx.WindowsVersion.BuildNumber + "." + Win32.SystemInfoEx.WindowsVersion.UpdateNumber : Win32.SystemInfoEx.WindowsVersion.BuildNumber.ToString(), CultureInfo.InvariantCulture);
 
-            bool result = false;
             if (version.StartsWith(">="))
             {
-                var parsed = decimal.Parse(version.Substring(2));
+                var parsed = decimal.Parse(version.Substring(2), CultureInfo.InvariantCulture);
                 if (currentBuild >= parsed)
                     result = true;
-            } else if (version.StartsWith("<="))
+            }
+            else if (version.StartsWith("<="))
             {
-                var parsed = decimal.Parse(version.Substring(2));
+                var parsed = decimal.Parse(version.Substring(2), CultureInfo.InvariantCulture);
                 if (currentBuild <= parsed)
                     result = true;
-            } else if (version.StartsWith(">"))
+            }
+            else if (version.StartsWith(">"))
             {
-                var parsed = decimal.Parse(version.Substring(1));
+                var parsed = decimal.Parse(version.Substring(1), CultureInfo.InvariantCulture);
                 if (currentBuild > parsed)
                     result = true;
-            } else if (version.StartsWith("<"))
+            }
+            else if (version.StartsWith("<"))
             {
-                var parsed = decimal.Parse(version.Substring(1));
+                var parsed = decimal.Parse(version.Substring(1), CultureInfo.InvariantCulture);
                 if (currentBuild < parsed)
                     result = true;
             }
             else
             {
-                var parsed = decimal.Parse(version);
+                var parsed = decimal.Parse(version, CultureInfo.InvariantCulture);
                 if (currentBuild == parsed)
                     result = true;
             }
@@ -689,30 +820,9 @@ namespace TrustedUninstaller.Shared
                 negative = true;
             }
 
-            var result = String.Equals(arch, RuntimeInformation.ProcessArchitecture.ToString(), StringComparison.OrdinalIgnoreCase);
+            var result = String.Equals(arch, Win32.SystemInfoEx.SystemArchitecture.ToString(), StringComparison.OrdinalIgnoreCase);
 
             return negative ? !result : result;
-        }
-        
-        public static async Task<bool> SafeRunAction(ITaskAction action)
-        {
-            try
-            {
-                return await action.RunTask();
-            }
-            catch (Exception e)
-            {
-                action.ResetProgress();
-                if (e.InnerException != null)
-                {
-                    ErrorLogger.WriteToErrorLog(e.InnerException.Message, e.InnerException.StackTrace, e.Message);
-                }
-                else
-                {
-                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, action.ErrorString());
-                }
-            }
-            return false;
         }
     }
 }

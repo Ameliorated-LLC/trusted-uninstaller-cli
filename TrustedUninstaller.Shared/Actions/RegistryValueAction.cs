@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using Core;
 using Microsoft.Win32;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
@@ -36,9 +37,9 @@ namespace TrustedUninstaller.Shared.Actions
         REG_UNKNOWN = RegistryValueKind.Unknown
     }
 
-    public class RegistryValueAction : TaskAction, ITaskAction
+    public class RegistryValueAction : Tasks.TaskAction, ITaskAction
     {
-        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
+        public void RunTaskOnMainThread(Output.OutputWriter output) { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "path")]
         public string KeyName { get; set; }
 
@@ -76,6 +77,8 @@ namespace TrustedUninstaller.Shared.Actions
 
             return ProgressWeight;
         }
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => true;
         
         private bool InProgress { get; set; }
         public void ResetProgress() => InProgress = false;
@@ -161,7 +164,7 @@ namespace TrustedUninstaller.Shared.Actions
                 .ToArray();
         }
 
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             try
             {
@@ -241,18 +244,17 @@ namespace TrustedUninstaller.Shared.Actions
             }
             catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog(e.Message,
-                    e.StackTrace, "RegistryValueAction Error");
+                Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                 return UninstallTaskStatus.ToDo;
             }
 
             return UninstallTaskStatus.Completed;
         }
 
-        public async Task<bool> RunTask()
+        public async Task<bool> RunTask(Output.OutputWriter output)
         {
 
-            Console.WriteLine($"{Operation.ToString().TrimEnd('e')}ing value '{Value}' in key '{KeyName}'...");
+            output.WriteLineSafe("Info", $"{Operation.ToString().TrimEnd('e')}ing value '{Value}' in key '{KeyName}'...");
             
             var roots = GetRoots();
 
@@ -271,8 +273,7 @@ namespace TrustedUninstaller.Shared.Actions
 
                         if (root == null)
                         {
-                            ErrorLogger.WriteToErrorLog($"User classes hive not found for hive {_root.Name}.",
-                                Environment.StackTrace, "RegistryValueAction Error");
+                            Log.WriteSafe(LogType.Warning, $"User classes hive not found for hive {_root.Name}.", new SerializableTrace(), output.LogOptions);
                             continue;
                         }
                     }
@@ -327,8 +328,7 @@ namespace TrustedUninstaller.Shared.Actions
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog(e.Message,
-                        e.StackTrace, "RegistryValueAction Error", root?.Name + "\\" + subKey);
+                    Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
                 }
             }
             return true;

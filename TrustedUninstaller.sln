@@ -5,6 +5,10 @@ VisualStudioVersion = 17.1.31911.260
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TrustedUninstaller.CLI", "TrustedUninstaller.CLI\TrustedUninstaller.CLI.csproj", "{476D3799-2CFC-4670-94E5-9AF51B234B07}"
 EndProject
+Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "Core", "Core\Core.shproj", "{DEBB633C-F189-49AE-92DD-4EB71CECCF90}"
+EndProject
+Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "Interprocess", "Interprocess\Interprocess.shproj", "{64B44592-888F-4C21-97EC-5DD7D84ED300}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TrustedUninstaller.Shared", "TrustedUninstaller.Shared\TrustedUninstaller.Shared.csproj", "{9BDA9D32-E9A1-4DB8-9D90-443792107E28}"
 EndProject
 Global

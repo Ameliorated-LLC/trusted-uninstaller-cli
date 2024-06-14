@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Core;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Serialization;
@@ -14,9 +15,9 @@ namespace TrustedUninstaller.Shared.Actions
         Delete = 0,
         Add = 1
     }
-    internal class LineInFileAction : TaskAction, ITaskAction
+    internal class LineInFileAction : Tasks.TaskAction, ITaskAction
     {
-        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
+        public void RunTaskOnMainThread(Output.OutputWriter output) { throw new NotImplementedException(); }
         [YamlMember(Alias = "path")]
         public string RawPath { get; set; }
 
@@ -29,13 +30,15 @@ namespace TrustedUninstaller.Shared.Actions
         [YamlMember(typeof(string), Alias = "weight")]
         public int ProgressWeight { get; set; } = 1;
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => true;
 
         private bool InProgress { get; set; } = false;
         public void ResetProgress() => InProgress = false;
         
         public string ErrorString() => $"LineInFileAction failed to {Operation.ToString().ToLower()} lines to file '{RawPath}'.";
         
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             if (InProgress)
             {
@@ -75,13 +78,13 @@ namespace TrustedUninstaller.Shared.Actions
             return Environment.ExpandEnvironmentVariables(RawPath);
         }
 
-        public async Task<bool> RunTask()
+        public async Task<bool> RunTask(Output.OutputWriter output)
         {
             if (InProgress) throw new TaskInProgressException("Another LineInFile action was called while one was in progress.");
             InProgress = true;
             
             //Wording should be improved here
-            Console.WriteLine($"{Operation.ToString().TrimEnd('e')}ing text lines in file '{RawPath}'...");
+            output.WriteLineSafe("Info", $"{Operation.ToString().TrimEnd('e')}ing text lines in file '{RawPath}'...");
 
             var realPath = this.GetRealPath();
             var missingLines = GetMissingLines();

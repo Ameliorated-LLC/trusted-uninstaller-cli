@@ -4,6 +4,7 @@ using TrustedUninstaller.Shared.Actions;
 using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Core.Events;
 using YamlDotNet.Serialization;
+using TaskAction = TrustedUninstaller.Shared.Actions.TaskAction;
 
 namespace TrustedUninstaller.Shared.Parser
 {
@@ -66,6 +67,9 @@ namespace TrustedUninstaller.Shared.Parser
                     return true;
                 case "!writeStatus:":
                     currentType = typeof(WriteStatusAction);
+                    return true;
+                case "!task:":
+                    currentType = typeof(TaskAction);
                     return true;
                 default:
                     return false;

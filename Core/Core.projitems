@@ -1,0 +1,38 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <MSBuildAllProjects>$(MSBuildAllProjects);$(MSBuildThisFileFullPath)</MSBuildAllProjects>
+    <HasSharedItems>true</HasSharedItems>
+    <SharedGUID>EED9CB45-0811-459B-B543-34865080843E</SharedGUID>
+  </PropertyGroup>
+  <PropertyGroup Label="Configuration">
+    <Import_RootNamespace>Core</Import_RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)Actions\CmdAction.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Actions\CoreActions.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Actions\RegistryKeyAction.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Actions\RegistryValueAction.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Actions\RunAction.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Actions\ServiceAction.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Actions\TaskKillAction.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Actions\UninstallTaskStatus.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Exceptions\UnexpectedException.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Helper\Interop\Helper.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Miscellaneous\Serializables.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Miscellaneous\StreamReaderWithPosition.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Miscellaneous\XmlDeserializer.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Services\Config.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Services\Log.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Services\Output.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Utilities\IdManagers.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Utilities\StringUtils.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Utilities\Wrap.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Win32\Win32.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="$(MSBuildThisFileDirectory)Helper\x64\Release\client-helper.dll">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+</Project>

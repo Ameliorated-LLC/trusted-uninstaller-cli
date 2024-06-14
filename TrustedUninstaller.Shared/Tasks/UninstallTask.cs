@@ -2,19 +2,23 @@
 using System.IO;
 using System.Linq;
 using System.Text;
+using JetBrains.Annotations;
 using TrustedUninstaller.Shared.Parser;
 using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Tasks
 {
+    public enum PreviousOption
+    {
+        Ignore,
+        
+    }
     public class UninstallTask
     {
         public string Title { get; set; }
 #nullable enable
         public string? Description { get; set; }
 
-        public string[]? SupportedBuilds { get; set; }
-        
         public int? MinVersion { get; set; }
         public int? MaxVersion { get; set; }
 #nullable disable
@@ -33,6 +37,15 @@ namespace TrustedUninstaller.Shared.Tasks
         public string[] Builds { get; set; } = null;
         [YamlMember(typeof(string), Alias = "cpuArch")]
         public string Arch { get; set; } = null;
+        
+        [YamlMember(typeof(bool?), Alias = "onUpgrade")]
+        public bool? OnUpgrade { get; set; } = null;
+        
+        [YamlMember(typeof(string[]), Alias = "onUpgradeVersions")]
+        public string[] OnUpgradeVersions { get; set; } = null;
+        
+        [YamlMember(typeof(string), Alias = "previousOption")]
+        [CanBeNull] public string PreviousOption { get; set; } = null;
         
         public List<string> Features { get; set; } = new List<string>();
 
@@ -62,14 +75,5 @@ namespace TrustedUninstaller.Shared.Tasks
             */
         }
 
-        public override string ToString()
-        {
-            var sb = new StringBuilder();
-            var sw = new StringWriter(sb);
-
-            var parser = new ConfigParser();
-            parser.SerializeItem(sw, this);
-            return sb.ToString();
-        }
     }
 }

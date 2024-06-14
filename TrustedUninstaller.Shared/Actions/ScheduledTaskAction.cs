@@ -4,6 +4,7 @@ using System.DirectoryServices.ActiveDirectory;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Core;
 using Microsoft.Win32.TaskScheduler;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
@@ -19,9 +20,9 @@ namespace TrustedUninstaller.Shared.Actions
         DeleteFolder = 3
     }
 
-    internal class ScheduledTaskAction : TaskAction, ITaskAction
+    internal class ScheduledTaskAction : Tasks.TaskAction, ITaskAction
     {
-        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
+        public void RunTaskOnMainThread(Output.OutputWriter output) { throw new NotImplementedException(); }
         [YamlMember(typeof(ScheduledTaskOperation), Alias = "operation")]
         public ScheduledTaskOperation Operation { get; set; } = ScheduledTaskOperation.Delete;
         [YamlMember(Alias = "data")]
@@ -32,13 +33,15 @@ namespace TrustedUninstaller.Shared.Actions
         [YamlMember(typeof(string), Alias = "weight")]
         public int ProgressWeight { get; set; } = 1;
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Log;
+        public bool GetRetryAllowed() => true;
 
         private bool InProgress { get; set; } = false;
         public void ResetProgress() => InProgress = false;
 
         public string ErrorString() => $"ScheduledTaskAction failed to change task {Path} to state {Operation.ToString()}";
 
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             if (InProgress)
             {
@@ -75,16 +78,16 @@ namespace TrustedUninstaller.Shared.Actions
             }
         }
 
-        public async Task<bool> RunTask()
+        public async Task<bool> RunTask(Output.OutputWriter output)
         {
-            if (GetStatus() == UninstallTaskStatus.Completed)
+            if (GetStatus(output) == UninstallTaskStatus.Completed)
             {
                 return true;
             }
 
             if (InProgress) throw new TaskInProgressException("Another ScheduledTask action was called while one was in progress.");
 
-            Console.WriteLine($"{Operation.ToString().TrimEnd('e')}ing scheduled task '{Path}'...");
+            output.WriteLineSafe("Info", $"{Operation.ToString().TrimEnd('e')}ing scheduled task '{Path}'...");
 
             using TaskService ts = new TaskService();
 
@@ -153,7 +156,7 @@ namespace TrustedUninstaller.Shared.Actions
                 }
                 catch (Exception e)
                 {
-                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "Error removing task folder.", folder.Name);
+                    Log.WriteExceptionSafe(LogType.Warning, e, $"Error removing task folder.", output.LogOptions);
                 }
 
                 InProgress = false;

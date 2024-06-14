@@ -3,11 +3,17 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net.Mime;
 using System.Reflection;
+using System.Runtime.Serialization;
+using System.Security;
+using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using Core;
+using Interprocess;
 using Microsoft.Win32;
 using TrustedUninstaller.Shared;
 using TrustedUninstaller.Shared.Actions;
@@ -17,18 +23,37 @@ namespace TrustedUninstaller.CLI
 {
     public class CLI
     {
+        private static async Task ParseArguments(string[] args)
+        {
+            CommandLine.IArgumentData argumentsData = null;
+            try
+            {
+                argumentsData = CommandLine.ParseArguments(args);
+            }
+            catch (Exception exception)
+            {
+                Console.WriteLine("Command line error: " + exception.Message);
+                Environment.Exit(1);
+            }
+            if (argumentsData is CommandLine.Interprocess interprocessData)
+            {
+                if (interprocessData.Level != Level.Disposable && !new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
+                    throw new SecurityException("Process must be run as an administrator.");
+                
+                Directory.SetCurrentDirectory(Path.GetDirectoryName(Win32.ProcessEx.GetCurrentProcessFileLocation())!);
+                await InterLink.InitializeConnection(interprocessData.Level, interprocessData.Mode, interprocessData.Host, interprocessData.Nodes?.Select(x => (Level: x.Level, ProcessID: x.ProcessID)).ToArray() ?? null);
+                Environment.Exit(376);
+            }
+        }
+        
         private static async System.Threading.Tasks.Task<int> Main(string[] args)
         {
+            if (args.Length > 1 && args[1] == "Interprocess")
+                await ParseArguments(args.Skip(1).ToArray());
+            
             //Needed after defender removal's reboot, the "current directory" will be set to System32
             //After the auto start up.
-            Directory.SetCurrentDirectory(AppDomain.CurrentDomain.BaseDirectory);
-
-            if (args.Length == 1 && args[0] == "-DisableDefender")
-            {
-                return DisableDefender();
-            }
-            
-            DualOut.Init();
+            Directory.SetCurrentDirectory(Path.GetDirectoryName(Win32.ProcessEx.GetCurrentProcessFileLocation())!);
 
             if (!WinUtil.IsAdministrator())
             {
@@ -51,9 +76,10 @@ namespace TrustedUninstaller.CLI
                 return -1;
             }
 
-            AmeliorationUtil.Playbook = await AmeliorationUtil.DeserializePlaybook(args[0]);
+            AmeliorationUtil.Playbook = AmeliorationUtil.DeserializePlaybook(Path.GetFullPath(args[0]));
 
-            if (!Directory.Exists($"{AmeliorationUtil.Playbook.Path}\\Configuration") || Directory.GetFiles($"{AmeliorationUtil.Playbook.Path}\\Configuration").Length == 0)
+            if (!Directory.Exists($"{AmeliorationUtil.Playbook.Path}\\Configuration") ||
+                Directory.GetFiles($"{AmeliorationUtil.Playbook.Path}\\Configuration").Length == 0)
             {
                 Console.WriteLine("Configuration folder is empty, put YAML files in it and restart the application.");
                 Console.WriteLine($"Current directory: {Directory.GetCurrentDirectory()}");
@@ -62,6 +88,8 @@ namespace TrustedUninstaller.CLI
 
             ExtractResourceFolder("resources", Directory.GetCurrentDirectory());
 
+            await InterLink.InitializeConnection(Level.Administrator, Mode.TwoWay);
+            
 
             if (!WinUtil.IsTrustedInstaller())
             {
@@ -77,18 +105,21 @@ namespace TrustedUninstaller.CLI
 
                     while ((await GetDefenderToggles()).Any(x => x))
                     {
-                        Console.WriteLine("All 4 windows security toggles must be set to off.\r\nNavigate to Windows Security > Virus & threat detection > manage settings.\r\nPress any key to continue...");
+                        Console.WriteLine(
+                            "All 4 windows security toggles must be set to off.\r\nNavigate to Windows Security > Virus & threat detection > manage settings.\r\nPress any key to continue...\r\n");
                         Console.ReadKey();
                     }
 
-                    bool remnantsOnly = Requirements.DefenderDisabled.RemnantsOnly();
+                    bool remnantsOnly = false;
 
-                    Console.WriteLine(remnantsOnly ? "The system must be prepared before continuing.\r\nPress any key to continue..." : "The system must be prepared before continuing. Your system will restart after preparation\r\nPress any key to continue...");
+                    Console.WriteLine(remnantsOnly
+                        ? "The system must be prepared before continuing.\r\nPress any key to continue..."
+                        : "The system must be prepared before continuing. Your system will restart after preparation\r\nPress any key to continue...");
                     Console.ReadKey();
                     try
                     {
                         Console.WriteLine("\r\nPreparing system...");
-                        PrepareSystemCLI();
+                        await PrepareSystemCLI(false);
                         Console.WriteLine("Preparation Complete");
 
                         if (!remnantsOnly)
@@ -100,11 +131,12 @@ namespace TrustedUninstaller.CLI
                                 Wait = false
                             };
 
-                            AmeliorationUtil.SafeRunAction(reboot).Wait();
+                            Wrap.ExecuteSafe(() => reboot.RunTaskOnMainThread(Output.OutputWriter.Null));
 
                             Environment.Exit(0);
                         }
-                    } catch (Exception e)
+                    }
+                    catch (Exception e)
                     {
                         Console.WriteLine("Error preparing system: " + e.Message);
                         Environment.Exit(-1);
@@ -149,7 +181,7 @@ namespace TrustedUninstaller.CLI
                         KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity",
                         Value = "Enabled",
                         Data = 1,
-                    }.GetStatus()
+                    }.GetStatus(Output.OutputWriter.Null)
                     != UninstallTaskStatus.Completed
                     &&
                     new RegistryValueAction()
@@ -157,7 +189,7 @@ namespace TrustedUninstaller.CLI
                         KeyName = @"HKLM\SYSTEM\CurrentControlSet\Control\CI\Config",
                         Value = "VulnerableDriverBlocklistEnable",
                         Data = 0,
-                    }.GetStatus()
+                    }.GetStatus(Output.OutputWriter.Null)
                     == UninstallTaskStatus.Completed && (await GetDefenderToggles()).All(toggleOn => !toggleOn))
                 {
                     AmeliorationUtil.UseKernelDriver = true;
@@ -165,34 +197,81 @@ namespace TrustedUninstaller.CLI
             }
             else
                 AmeliorationUtil.UseKernelDriver = AmeliorationUtil.Playbook.UseKernelDriver.Value;
-            
+
             try
             {
                 if (!Directory.Exists(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ame-assassin")))
                 {
-                    Console.WriteLine(":AME-STATUS: Extracting resources");
+                    Console.WriteLine("Extracting resources");
 
                     ExtractResourceFolder("resources", Directory.GetCurrentDirectory());
                     ExtractArchive(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "CLI-Resources.7z"), AppDomain.CurrentDomain.BaseDirectory);
-                    if (AmeliorationUtil.UseKernelDriver) ExtractArchive(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ProcessInformer.7z"), AppDomain.CurrentDomain.BaseDirectory);
+                    if (AmeliorationUtil.UseKernelDriver)
+                        ExtractArchive(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ProcessInformer.7z"), AppDomain.CurrentDomain.BaseDirectory);
                     try
                     {
                         File.Delete(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "CLI-Resources.7z"));
                         File.Delete(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ProcessInformer.7z"));
-                    } catch (Exception e)
+                    }
+                    catch (Exception e)
                     {
                     }
                 }
-            } catch (Exception e)
+            }
+            catch (Exception e)
             {
-                ErrorLogger.WriteToErrorLog(e.Message,
-                    e.StackTrace, "Error extracting resources.");
-
-                Console.WriteLine($":AME-Fatal Error: Error extracting resources.");
+                Console.WriteLine($"Error extracting resources.");
                 return -1;
             }
 
-            await AmeliorationUtil.StartAmelioration();
+            var launchResult = await SafeTask.Run(
+                () => InterLink.LaunchNode(TargetLevel.Administrator,
+                    arguments => NativeProcess.StartProcessAsTI(Win32.ProcessEx.GetCurrentProcessFileLocation(), arguments), Level.TrustedInstaller, Mode.TwoWay,
+                    Process.GetCurrentProcess().Id, false),
+                true);
+            if (launchResult.Failed)
+            {
+                Console.WriteLine("Could not initialize process. Check the error logs and contact the team " + "for more information and assistance.");
+                Environment.Exit(1);
+            }
+
+            List<string> options = null;
+            if (args.Length > 1)
+            {
+                options = args.Skip(1).ToList();
+            }
+
+            var status = "Starting Playbook";
+            bool errorsOccurred = false;
+            try
+            {
+                using (var reporter = new InterLink.InterMessageReporter(statusText => { status = statusText.TrimEnd('.') + "..."; }))
+                {
+                    using (var progress = new InterLink.InterProgress(async value => { Console.WriteLine(value + "% " + status + "..."); }))
+                    {
+                        errorsOccurred = await InterLink.ExecuteAsync(() => AmeliorationUtil.RunPlaybook(AmeliorationUtil.Playbook.Path, options.ToArray(),
+                            Environment.CurrentDirectory, progress, reporter, AmeliorationUtil.UseKernelDriver));
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                InterLink.ShutdownNode(Level.TrustedInstaller);
+
+                if (exception is SerializableException serializableException && serializableException.OriginalType.Type == typeof(SerializationException))
+                {
+                    Console.WriteLine("\r\nYAML Error: " + exception.ToString());
+                    Environment.Exit(1);
+                }
+
+                Console.WriteLine("\r\nFatal Playbook Error: " + exception.ToString());
+                Environment.Exit(1);
+            }
+
+            if (errorsOccurred)
+                Console.WriteLine("\r\nPlaybook completed with errors.");
+            else
+                Console.WriteLine("\r\nPlaybook completed successfully.");
 
             return 0;
         }
@@ -228,7 +307,7 @@ namespace TrustedUninstaller.CLI
             proc.CancelErrorRead();
 
             if (proc.ExitCode == 1)
-                ErrorLogger.WriteToErrorLog(errorOutput.ToString(), Environment.StackTrace, "Warning while running 7zip.", command);
+                Log.EnqueueSafe(LogType.Error, "Warning while running 7zip: " + errorOutput.ToString(), null, ("Command", command));
             if (proc.ExitCode > 1)
                 throw new ArgumentOutOfRangeException("Error running 7zip: " + errorOutput.ToString());
         }
@@ -239,7 +318,7 @@ namespace TrustedUninstaller.CLI
 
             Assembly assembly = Assembly.GetExecutingAssembly();
 
-            var resources = assembly.GetManifestResourceNames().Where(res => res.StartsWith($"TrustedUninstaller.CLI.Properties"));
+            var resources = assembly.GetManifestResourceNames().Where(res => res.StartsWith($"TrustedUninstaller.CLI.Properties.{resource}."));
 
             foreach (var obj in resources)
             {
@@ -260,7 +339,8 @@ namespace TrustedUninstaller.CLI
                         try
                         {
                             File.Delete(file);
-                        } catch (Exception e)
+                        }
+                        catch (Exception e)
                         {
                             if (!Directory.Exists(Directory.GetCurrentDirectory() + "\\Logs"))
                                 Directory.CreateDirectory(Directory.GetCurrentDirectory() + "\\Logs");
@@ -315,7 +395,8 @@ namespace TrustedUninstaller.CLI
                     try
                     {
                         realtimePolicy = policiesKey.OpenSubKey("Real-Time Protection");
-                    } catch (Exception e)
+                    }
+                    catch (Exception e)
                     {
                     }
 
@@ -323,7 +404,8 @@ namespace TrustedUninstaller.CLI
                         realtimeKey = realtimePolicy;
                     else
                         realtimeKey = defenderKey.OpenSubKey("Real-Time Protection");
-                } catch
+                }
+                catch
                 {
                     result.Add(false);
                 }
@@ -333,13 +415,15 @@ namespace TrustedUninstaller.CLI
                     try
                     {
                         result.Add((int)realtimeKey.GetValue("DisableRealtimeMonitoring") != 1);
-                    } catch (Exception exception)
+                    }
+                    catch (Exception exception)
                     {
                         try
                         {
                             realtimeKey = defenderKey.OpenSubKey("Real-Time Protection");
                             result.Add((int)realtimeKey.GetValue("DisableRealtimeMonitoring") != 1);
-                        } catch (Exception e)
+                        }
+                        catch (Exception e)
                         {
                             result.Add(true);
                         }
@@ -354,7 +438,8 @@ namespace TrustedUninstaller.CLI
                     try
                     {
                         spynetPolicy = policiesKey.OpenSubKey("SpyNet");
-                    } catch (Exception e)
+                    }
+                    catch (Exception e)
                     {
                     }
 
@@ -368,7 +453,8 @@ namespace TrustedUninstaller.CLI
                     try
                     {
                         reporting = (int)spynetKey.GetValue("SpyNetReporting");
-                    } catch (Exception e)
+                    }
+                    catch (Exception e)
                     {
                         if (spynetPolicy != null)
                         {
@@ -379,7 +465,8 @@ namespace TrustedUninstaller.CLI
                     try
                     {
                         consent = (int)spynetKey.GetValue("SubmitSamplesConsent");
-                    } catch (Exception e)
+                    }
+                    catch (Exception e)
                     {
                         if (spynetPolicy != null)
                         {
@@ -389,7 +476,8 @@ namespace TrustedUninstaller.CLI
 
                     result.Add(reporting != 0);
                     result.Add(consent != 0 && consent != 2 && consent != 4);
-                } catch
+                }
+                catch
                 {
                     result.Add(false);
                     result.Add(false);
@@ -399,7 +487,8 @@ namespace TrustedUninstaller.CLI
                 {
                     int tamper = (int)defenderKey.OpenSubKey("Features").GetValue("TamperProtection");
                     result.Add(tamper != 4 && tamper != 0);
-                } catch
+                }
+                catch
                 {
                     result.Add(false);
                 }
@@ -407,107 +496,14 @@ namespace TrustedUninstaller.CLI
             return result;
         }
 
-        private static int DisableDefender()
+        public static async Task PrepareSystemCLI(bool KernelDriverOnly)
         {
-            try
-            {
-                Defender.Disable();
-            }
-            catch (Exception ex)
-            {
-                ErrorLogger.WriteToErrorLog(ex.GetType() + ": " + ex.Message, ex.StackTrace,
-                    $"First Defender disable failed from second process.");
-                
-                Defender.Kill();
-                try
-                {
-                    Defender.Disable();
-                }
-                catch (Exception e)
-                {
-                    ErrorLogger.WriteToErrorLog(e.GetType() + ": " + e.Message, e.StackTrace,
-                        $"Could not disable Windows Defender from second process.");
-
-                    return 1;
-                }
-            }
-            return 0;
-        }
-        
-        public static void PrepareSystemCLI()
-        {
-            try
-            {
-                if (!Defender.Kill())
-                {
-                    ErrorLogger.WriteToErrorLog("Unknown reason", null, "Could not kill Defender");
-
-                    try
-                    {
-                        var process = Defender.StartElevatedProcess(Assembly.GetExecutingAssembly().Location, $@"-DisableDefender");
-                        var exitCode = Defender.WaitForProcessExit(process, 10000);
-                        if (exitCode != 0)
-                            throw new Exception("Exit code was nonzero.");
-                    } catch (Exception e)
-                    {
-                        ErrorLogger.WriteToErrorLog(e.GetType() + ": " + e.Message, e.StackTrace, "First Defender disable failed");
-
-                        Thread.Sleep(1000);
-                        if (!Defender.Kill())
-                        {
-                            Thread.Sleep(3000);
-                            Defender.Kill();
-                        }
-
-                        try
-                        {
-                            var process = Defender.StartElevatedProcess(Assembly.GetExecutingAssembly().Location, $@"-DisableDefender");
-                            var exitCode = Defender.WaitForProcessExit(process, 10000);
-                            if (exitCode != 0)
-                                throw new Exception("Exit code was nonzero.");
-                        } catch (Exception exception)
-                        {
-                            ErrorLogger.WriteToErrorLog(e.GetType() + ": " + e.Message, e.StackTrace, "Second Defender disable failed");
-
-                            Defender.Disable();
-                        }
-                    }
-                }
-                else
-                {
-                    try
-                    {
-                        var process = Defender.StartElevatedProcess(Assembly.GetExecutingAssembly().Location, $@"-DisableDefender");
-                        var exitCode = Defender.WaitForProcessExit(process, 15000);
-                        if (exitCode != 0)
-                            throw new Exception("Exit code was nonzero.");
-                    } catch (Exception e)
-                    {
-                        ErrorLogger.WriteToErrorLog(e.GetType() + ": " + e.Message, e.StackTrace, "First Defender disable failed");
-
-                        Defender.Disable();
-                    }
-                }
-            } catch
-            {
-            }
-        }
-
-        public static async Task UninstallDriver()
-            {
-                CmdAction cmdAction = new CmdAction();
-                try
-                {
-                    Console.WriteLine("Removing driver...");
-                    cmdAction.Command = Environment.Is64BitOperatingSystem
-                        ? $"ProcessHacker\\x64\\ProcessHacker.exe -s -uninstallkph"
-                        : $"ProcessHacker\\x86\\ProcessHacker.exe -s -uninstallkph";
-                    await cmdAction.RunTask();
-                } catch (Exception e)
-                {
-                    ErrorLogger.WriteToErrorLog(e.Message, e.StackTrace, "ProcessHacker ran into an Error while uninstalling the driver.");
-                    throw;
-                }
-            }
+            var status = "Adding certificate";
+            using var progress = new InterLink.InterProgress(value => Console.WriteLine(value + "% " + status + "..."));
+            using var messageReporter = new InterLink.InterMessageReporter(message => status = message);
+            
+            var task = KernelDriverOnly ? InterLink.ExecuteAsync(() => Defender.DisableBlocklist()) : InterLink.ExecuteAsync(() => Defender.KillAndDisable(progress, messageReporter, false, true));
+            await task;
         }
     }
+}

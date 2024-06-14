@@ -17,6 +17,7 @@
     <AllowedReferenceRelatedFileExtensions>
       *.xml
     </AllowedReferenceRelatedFileExtensions>
+    <Nullable>disable</Nullable>
   </PropertyGroup>
   <PropertyGroup>
     <PathMap>$([System.IO.Path]::GetFullPath('$(SolutionDir)'))=./</PathMap>
@@ -29,7 +30,7 @@
     <PlatformTarget>x64</PlatformTarget>
     <ErrorReport>prompt</ErrorReport>
     <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
-    <Nullable>enable</Nullable>
+    <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)' == 'Release|x64'">
@@ -40,26 +41,11 @@
     <PlatformTarget>x64</PlatformTarget>
     <ErrorReport>prompt</ErrorReport>
     <CodeAnalysisRuleSet>MinimumRecommendedRules.ruleset</CodeAnalysisRuleSet>
-    <Nullable>enable</Nullable>
+    <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Single File|x64' ">
-    <OutputPath>bin\x64\Release\</OutputPath>
-    <PlatformTarget>x64</PlatformTarget>
-    <Optimize>true</Optimize>
-    <DebugType>embedded</DebugType>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <DefineConstants>SINGLE</DefineConstants>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug Single File|x64' ">
-    <OutputPath>bin\x64\Release\</OutputPath>
-    <PlatformTarget>x64</PlatformTarget>
-    <Optimize>true</Optimize>
-    <DebugType>embedded</DebugType>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <DefineConstants>SINGLE;DEBUG</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="PresentationCore" />
     <Reference Include="PresentationFramework" />
     <Reference Include="System" />
     <Reference Include="System.Configuration.Install" />
@@ -71,18 +57,20 @@
       <Private>True</Private>
     </Reference>
     <Reference Include="System.Management" />
+    <Reference Include="System.Memory">
+      <HintPath>..\..\..\..\..\.nuget\packages\system.memory\4.5.4\lib\net461\System.Memory.dll</HintPath>
+    </Reference>
     <Reference Include="System.Net.Http" />
     <Reference Include="System.ServiceProcess" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="Microsoft.CSharp" />
     <Reference Include="System.Xml" />
-    <Reference Include="YamlDotNet">
-      <HintPath>..\TrustedUninstaller.GUI\bin\x64\Release\YamlDotNet.dll</HintPath>
-    </Reference>
+    <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Actions\RegistryValueAction.cs" />
     <Compile Include="Actions\SystemPackageAction.cs" />
+    <Compile Include="Actions\TaskAction.cs" />
     <Compile Include="Actions\TaskKillAction.cs" />
     <Compile Include="Actions\ScheduledTaskAction.cs" />
     <Compile Include="Actions\LineInFileAction.cs" />
@@ -100,27 +88,25 @@
     <Compile Include="Actions\WriteStatusAction.cs" />
     <Compile Include="AmeliorationUtil.cs" />
     <Compile Include="AugmentedProcess.cs" />
-    <Compile Include="Debug.cs" />
     <Compile Include="Defender.cs" />
-    <Compile Include="DualOut.cs" />
+    <Compile Include="Exceptions\ErrorHandlingException.cs" />
     <Compile Include="Globals.cs" />
     <Compile Include="Playbook.cs" />
     <Compile Include="ProcessPrivilege.cs" />
     <Compile Include="ProviderStatus.cs" />
-    <Compile Include="ErrorLogger.cs" />
     <Compile Include="Exceptions\InvalidRegistryEntryException.cs" />
     <Compile Include="Exceptions\TaskInProgressException.cs" />
     <Compile Include="NativeProcess.cs" />
-    <Compile Include="Parser\ConfigParser.cs" />
+    <Compile Include="Parser\PlaybookParser.cs" />
     <Compile Include="Parser\TaskActionResolver.cs" />
     <Compile Include="Predicates\IPredicate.cs" />
     <Compile Include="Requirements.cs" />
+    <Compile Include="Tasks\OutputProcessor.cs" />
     <Compile Include="Tasks\TaskAction.cs" />
     <Compile Include="Tasks\UninstallTaskPrivilege.cs" />
     <Compile Include="Tasks\ITaskAction.cs" />
     <Compile Include="Tasks\UninstallTaskStatus.cs" />
     <Compile Include="Tasks\UninstallTask.cs" />
-    <Compile Include="Win32.cs" />
     <Compile Include="WinUtil.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
@@ -148,7 +134,10 @@
     <WCFMetadata Include="Connected Services\" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Ben.Demystifier" Version="0.4.1" />
+    <PackageReference Include="JetBrains.Annotations" Version="2024.2.0-eap1" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Polly.Core" Version="8.2.1" />
     <PackageReference Include="System.IO" Version="4.3.0" />
     <PackageReference Include="System.IO.FileSystem" Version="4.3.0" />
     <PackageReference Include="System.IO.FileSystem.Primitives" Version="4.3.0" />
@@ -159,6 +148,7 @@
     <PackageReference Include="System.Security.Cryptography.Primitives" Version="4.3.0" />
     <PackageReference Include="System.Security.Cryptography.X509Certificates" Version="4.3.0" />
     <PackageReference Include="System.Security.Principal.Windows" Version="5.0.0" />
+    <PackageReference Include="System.Text.Json" Version="9.0.0-preview.5.24306.7" />
     <PackageReference Include="TaskScheduler" Version="2.10.1" />
     <PackageReference Include="YamlDotNet" Version="11.2.1" />
   </ItemGroup>
@@ -173,16 +163,6 @@
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
     <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Single File|x64' Or '$(Configuration)|$(Platform)' == 'Debug Single File|x64' ">
-    <PostBuildEvent>for /f "usebackq delims=" %%A in (`DIR /B /S /A:d "$(SolutionDir)" ^| FINDSTR /R /c:".*\\bin\\.*\\de$" /c:".*\\bin\\.*\\en$" /c:".*\\bin\\.*\\es$" /c:".*\\bin\\.*\\fr$" /c:".*\\bin\\.*\\it$" /c:".*\\bin\\.*\\ja$" /c:".*\\bin\\.*\\ko$" /c:".*\\bin\\.*\\ru$" /c:".*\\bin\\.*\\zh-Hans$" /c:".*\\bin\\.*\\zh-Hant$" /c:".*\\bin\\.*\\pl$" /c:".*\\bin\\.*\\zh-CN$"`) do (RMDIR /Q /S "%%A" &amp; cmd /c "exit /b 0")
-      PowerShell -NoP -C "Start-Process '$(SolutionDir)\TrustedUninstaller.GUI\gui-builder\ame-builder.exe' -ArgumentList 'Shared','""""x64\$(Configuration)""""' -NoNewWindow -Wait"
-    </PostBuildEvent>
-    <AllowedReferenceRelatedFileExtensions>
-      <!-- Prevent default XML files copied to output.-->
-      .allowedextension
-    </AllowedReferenceRelatedFileExtensions>
-  </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' != 'Single File|x64' And '$(Configuration)|$(Platform)' != 'Debug Single File|x64' ">
-    <PostBuildEvent>for /f "usebackq delims=" %%A in (`DIR /B /S /A:d "$(SolutionDir)" ^| FINDSTR /R /c:".*\\bin\\.*\\de$" /c:".*\\bin\\.*\\en$" /c:".*\\bin\\.*\\es$" /c:".*\\bin\\.*\\fr$" /c:".*\\bin\\.*\\it$" /c:".*\\bin\\.*\\ja$" /c:".*\\bin\\.*\\ko$" /c:".*\\bin\\.*\\ru$" /c:".*\\bin\\.*\\zh-Hans$" /c:".*\\bin\\.*\\zh-Hant$" /c:".*\\bin\\.*\\pl$" /c:".*\\bin\\.*\\zh-CN$"`) do (RMDIR /Q /S "%%A" &amp; cmd /c "exit /b 0")</PostBuildEvent>
-  </PropertyGroup>
+  <Import Project="..\Interprocess\Interprocess.projitems" Label="Shared" />
+  <Import Project="..\Core\Core.projitems" Label="Shared" />
 </Project>

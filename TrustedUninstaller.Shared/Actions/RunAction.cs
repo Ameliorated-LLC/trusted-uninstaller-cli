@@ -1,35 +1,31 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Documents;
+using Core;
+using JetBrains.Annotations;
+using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public enum Privilege
+    public class RunAction : Tasks.TaskActionWithOutputProcessor, ITaskAction
     {
-        TrustedInstaller,
-        System,
-        CurrentUserElevated,
-        CurrentUser,
-    }
-    
-    public class RunAction : TaskAction, ITaskAction
-    {
-        public void RunTaskOnMainThread()
+        public void RunTaskOnMainThread(Output.OutputWriter output)
         {
             if (RawPath != null) RawPath = Environment.ExpandEnvironmentVariables(RawPath);
             InProgress = true;
 
             var privilegeText = RunAs == Privilege.CurrentUser ? " as the current user" : RunAs == Privilege.CurrentUserElevated ? " as the current user elevated" : RunAs == Privilege.System ?
-                " as the system account" : "";
+                " as the system account" : RunAs == Privilege.CurrentUserTrustedInstaller ? " as the current user trusted installer" : "";
             
-            if (Arguments == null) Console.WriteLine($"Running '{Exe + privilegeText}'...");
-            else Console.WriteLine($"Running '{Exe}' with arguments '{Arguments + privilegeText}'...");
+            if (Arguments == null) output.WriteLineSafe("Info", $"Running '{Exe + privilegeText}'...");
+            else output.WriteLineSafe("Info", $"Running '{Exe}' with arguments '{Arguments + "'" + privilegeText}...");
 
             WinUtil.CheckKph();
             
@@ -46,11 +42,11 @@ namespace TrustedUninstaller.Shared.Actions
 
             if (file == null)
                 throw new FileNotFoundException($"Executable not found.");
-            
+
             if (RunAs == Privilege.TrustedInstaller)
-                RunAsProcess(file);
+                RunAsProcess(file, output);
             else
-                RunAsPrivilegedProcess(file);
+                RunAsPrivilegedProcess(file, output);
 
             InProgress = false;
             return;
@@ -87,17 +83,20 @@ namespace TrustedUninstaller.Shared.Actions
 
         [YamlMember(typeof(string), Alias = "wait")]
         public bool Wait { get; set; } = true;
+
+        [YamlMember(typeof(Dictionary<string, ExitCodeAction>), Alias = "handleExitCodes")]
+        [CanBeNull] public Dictionary<string, ExitCodeAction> HandleExitCodes { get; set; } = null;
         
         [YamlMember(typeof(string), Alias = "weight")]
         public int ProgressWeight { get; set; } = 5;
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => false;
 
         private bool InProgress { get; set; } = false;
         public void ResetProgress() => InProgress = false;
         private bool HasExited { get; set; } = false;
         //public int ExitCode { get; set; }
-        public string? Output { get; private set; }
-        private string? StandardError { get; set; }
         
         public string ErrorString() => String.IsNullOrEmpty(Arguments) ? $"RunAction failed to execute '{Exe}'." : $"RunAction failed to execute '{Exe}' with arguments '{Arguments}'.";
         
@@ -118,7 +117,7 @@ namespace TrustedUninstaller.Shared.Actions
             return false;
         }
         
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             if (InProgress)
             {
@@ -128,20 +127,20 @@ namespace TrustedUninstaller.Shared.Actions
             return HasExited || !Wait ?  UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo;
         }
 
-        public Task<bool> RunTask()
+        public Task<bool> RunTask(Output.OutputWriter output)
         {
             return null;
         }
 
-        private void RunAsProcess(string file)
+        private void RunAsProcess(string file, Output.OutputWriter output)
         {
             var startInfo = new ProcessStartInfo
             {
                 CreateNoWindow = !this.CreateWindow,
                 UseShellExecute = false,
                 WindowStyle = ProcessWindowStyle.Normal,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
+                RedirectStandardError = ShowError,
+                RedirectStandardOutput = ShowOutput,
                 FileName = file,
             };
             if (Arguments != null) startInfo.Arguments = Environment.ExpandEnvironmentVariables(Arguments);
@@ -155,79 +154,61 @@ namespace TrustedUninstaller.Shared.Actions
                 startInfo.UseShellExecute = true;
             }
 
-            if (!ShowOutput)
-                startInfo.RedirectStandardOutput = false;
-            if (!ShowError)
-                startInfo.RedirectStandardError = false;
-
-            var exeProcess = new Process
+            using var exeProcess = new Process
             {
                 StartInfo = startInfo,
                 EnableRaisingEvents = true
             };
 
-            exeProcess.Start();
-
-            if (!Wait)
+            using (var handler = new OutputHandler("Process", exeProcess, output))
             {
-                exeProcess.Dispose();
-                return;
-            }
-
-            if (ShowOutput)
-                exeProcess.OutputDataReceived += ProcOutputHandler;
-            if (ShowError)
-                exeProcess.ErrorDataReceived += ProcOutputHandler;
-
-            if (ShowOutput)
-                exeProcess.BeginOutputReadLine();
-            if (ShowError)
-                exeProcess.BeginErrorReadLine();
-
-            if (Timeout.HasValue)
-            {
-                var exited = exeProcess.WaitForExit(Timeout.Value);
-                if (!exited)
+                handler.StartProcess();
+             
+                if (!Wait)
                 {
-                    exeProcess.Kill();
-                    throw new TimeoutException($"Executable run timeout exceeded.");
+                    return;
                 }
-            }
-            else
-            {
-                bool exited = exeProcess.WaitForExit(30000);
-
-                // WaitForExit alone seems to not be entirely reliable
-                while (!exited && ExeRunning(exeProcess.ProcessName, exeProcess.Id))
+                
+                if (Timeout.HasValue)
                 {
-                    exited = exeProcess.WaitForExit(30000);
+                    var exited = exeProcess.WaitForExit(Timeout.Value);
+                    if (!exited)
+                    {
+                        handler.CancelReading();
+                        exeProcess.Kill();
+                        throw new TimeoutException($"Executable run timeout exceeded.");
+                    }
+                }
+                else
+                {
+                    bool exited = exeProcess.WaitForExit(30000);
+
+                    // WaitForExit alone seems to not be entirely reliable
+                    while (!exited && ExeRunning(exeProcess.ProcessName, exeProcess.Id))
+                    {
+                        exited = exeProcess.WaitForExit(30000);
+                    }
                 }
             }
 
-            int exitCode = 0;
-            try
-            {
-                exitCode = exeProcess.ExitCode;
-            }
-            catch (Exception ex)
-            {
-                ErrorLogger.WriteToErrorLog("Error fetching process exit code. (1)", null, "RunAction Error", Exe + " " + Arguments);
-            }
+            int exitCode = Wrap.ExecuteSafe(() => exeProcess.ExitCode, true, output.LogOptions).Value;
             if (exitCode != 0)
-            {
-                ErrorLogger.WriteToErrorLog("Process exited with a non-zero exit code: " + exitCode, null, "RunAction Error", Exe + " " + Arguments);
-            }
+                output.WriteLineSafe("Info", $"Process exited with a non-zero exit code: {exitCode}");
 
             HasExited = true;
-
-            if (ShowOutput)
-                exeProcess.CancelOutputRead();
-            if (ShowError)
-                exeProcess.CancelErrorRead();
             
-            exeProcess.Dispose();
+            if (HandleExitCodes != null)
+            {
+                foreach (string key in HandleExitCodes.Keys)
+                {
+                    if (IsApplicableNumber(key, exitCode))
+                    {
+                        throw new ErrorHandlingException(HandleExitCodes[key], $"Process '{Exe}' exit code {exitCode} handled with filter '{key}' --> {HandleExitCodes[key]}.");
+                    }
+                }
+            }
         }
-        private void RunAsPrivilegedProcess(string file)
+        private void RunAsPrivilegedProcess(string file, Output.OutputWriter output)
         {
             var startInfo = new AugmentedProcess.ProcessStartInfo
             {
@@ -254,83 +235,50 @@ namespace TrustedUninstaller.Shared.Actions
             if (!ShowError)
                 startInfo.RedirectStandardError = false;
 
-            var exeProcess = new AugmentedProcess.Process
+            using var exeProcess = new AugmentedProcess.Process
             {
                 StartInfo = startInfo,
                 EnableRaisingEvents = true
             };
 
-            ProcessPrivilege.StartPrivilegedTask(exeProcess, RunAs);
-
-            if (!Wait)
+            using (var handler = new OutputHandler("Process", exeProcess, output))
             {
-                exeProcess.Dispose();
-                return;
-            }
-
-            if (ShowOutput)
-                exeProcess.OutputDataReceived += PrivilegedProcOutputHandler;
-            if (ShowError)
-                exeProcess.ErrorDataReceived += PrivilegedProcOutputHandler;
-
-            if (ShowOutput)
-                exeProcess.BeginOutputReadLine();
-            if (ShowError)
-                exeProcess.BeginErrorReadLine();
-
-            if (Timeout.HasValue)
-            {
-                var exited = exeProcess.WaitForExit(Timeout.Value);
-                if (!exited)
+                handler.StartProcess(RunAs);
+             
+                if (!Wait)
                 {
-                    exeProcess.Kill();
-                    throw new TimeoutException($"Executable run timeout exceeded.");
+                    return;
                 }
-            }
-            else
-            {
-                bool exited = exeProcess.WaitForExit(30000);
-
-                // WaitForExit alone seems to not be entirely reliable
-                while (!exited && ExeRunning(exeProcess.ProcessName, exeProcess.Id))
-                {
-                    exited = exeProcess.WaitForExit(30000);
-                }
-            }
-
-            try
-            {
-                if (exeProcess.ExitCode != 0)
-                {
-                    ErrorLogger.WriteToErrorLog("Process exited with a non-zero exit code: " + exeProcess.ExitCode, null, "RunAction Error", Exe + " " + Arguments);
-                }
-            }
-            catch (Exception ex)
-            {
-                ErrorLogger.WriteToErrorLog("Error fetching process exit code. (1)", null, "RunAction Error", Exe + " " + Arguments);
                 
-                Thread.Sleep(500);
-                try
+                if (Timeout.HasValue)
                 {
-                    if (exeProcess.ExitCode != 0)
+                    var exited = exeProcess.WaitForExit(Timeout.Value);
+                    if (!exited)
                     {
-                        ErrorLogger.WriteToErrorLog("Process exited with a non-zero exit code: " + exeProcess.ExitCode, null, "RunAction Error", Exe + " " + Arguments);
+                        handler.CancelReading();
+                        exeProcess.Kill();
+                        throw new TimeoutException($"Executable run timeout exceeded.");
+                    }
+                    
+                    
+                }
+                else
+                {
+                    bool exited = exeProcess.WaitForExit(30000);
+
+                    // WaitForExit alone seems to not be entirely reliable
+                    while (!exited && ExeRunning(exeProcess.ProcessName, exeProcess.Id))
+                    {
+                        exited = exeProcess.WaitForExit(30000);
                     }
                 }
-                catch (Exception e)
-                {
-                    ErrorLogger.WriteToErrorLog("Error fetching process exit code. (2)", null, "RunAction Error", Exe + " " + Arguments);
-                }
             }
 
-            HasExited = true;
+            int exitCode = Wrap.ExecuteSafe(() => exeProcess.ExitCode, true, output.LogOptions).Value;
+            if (exitCode != 0)
+                output.WriteLineSafe("Info", $"Process exited with a non-zero exit code: {exeProcess.ExitCode}");
 
-            if (ShowOutput)
-                exeProcess.CancelOutputRead();
-            if (ShowError)
-                exeProcess.CancelErrorRead();
-            
-            exeProcess.Dispose();
+            HasExited = true;
         }
         
         private static bool ExeRunning(string name, int id)
@@ -342,59 +290,6 @@ namespace TrustedUninstaller.Shared.Actions
             catch (Exception)
             {
                 return false;
-            }
-        }
-
-        private void PrivilegedProcOutputHandler(object sendingProcess, AugmentedProcess.DataReceivedEventArgs outLine)
-        {
-            try
-            {
-                // Collect the sort command output. 
-                if (!String.IsNullOrEmpty(outLine.Data))
-                {
-                    var outputString = outLine.Data;
-
-                    if (outputString.Contains("\\AME"))
-                    {
-                        outputString = outputString.Substring(outputString.IndexOf('>') + 1);
-                    }
-                    Console.WriteLine(outputString);
-                    Output += outputString + Environment.NewLine;
-                }
-                else
-                {
-                    Console.WriteLine();
-                }
-            }
-            catch (Exception e)
-            {
-                ErrorLogger.WriteToErrorLog("Error processing process output", e.StackTrace, "RunAction Error", Exe);
-            }
-        }
-        private void ProcOutputHandler(object sendingProcess, DataReceivedEventArgs outLine)
-        {
-            try
-            {
-                // Collect the sort command output. 
-                if (!String.IsNullOrEmpty(outLine.Data))
-                {
-                    var outputString = outLine.Data;
-
-                    if (outputString.Contains("\\AME"))
-                    {
-                        outputString = outputString.Substring(outputString.IndexOf('>') + 1);
-                    }
-                    Console.WriteLine(outputString);
-                    Output += outputString + Environment.NewLine;
-                }
-                else
-                {
-                    Console.WriteLine();
-                }
-            }
-            catch (Exception e)
-            {
-                ErrorLogger.WriteToErrorLog("Error processing process output", e.StackTrace, "RunAction Error", Exe);
             }
         }
     }

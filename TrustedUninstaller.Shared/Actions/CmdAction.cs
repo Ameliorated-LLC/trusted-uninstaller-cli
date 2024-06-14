@@ -1,19 +1,23 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Core;
+using JetBrains.Annotations;
 using TrustedUninstaller.Shared.Exceptions;
 using TrustedUninstaller.Shared.Tasks;
 using YamlDotNet.Serialization;
 
 namespace TrustedUninstaller.Shared.Actions
 {
-    public class CmdAction : TaskAction, ITaskAction
+    public class CmdAction : Tasks.TaskActionWithOutputProcessor, ITaskAction
     {
-        public void RunTaskOnMainThread()
+        public void RunTaskOnMainThread(Output.OutputWriter output)
         {
             if (InProgress) throw new TaskInProgressException("Another Cmd action was called while one was in progress.");
             InProgress = true;
@@ -21,14 +25,14 @@ namespace TrustedUninstaller.Shared.Actions
             var privilegeText = RunAs == Privilege.CurrentUser ? " as the current user" : RunAs == Privilege.CurrentUserElevated ? " as the current user elevated" : RunAs == Privilege.System ?
                 " as the system account" : "";
             
-            Console.WriteLine($"Running cmd command '{Command}'{privilegeText}...");
+            output.WriteLineSafe("Info", $"Running cmd command '{Command}'{privilegeText}...");
 
             ExitCode = null;
-            
+
             if (RunAs == Privilege.TrustedInstaller)
-                RunAsProcess();
+                RunAsProcess(output);
             else
-                RunAsPrivilegedProcess();
+                RunAsPrivilegedProcess(output);
 
             InProgress = false;
         }
@@ -38,7 +42,7 @@ namespace TrustedUninstaller.Shared.Actions
         [YamlMember(typeof(string), Alias = "command")]
         public string Command { get; set; }
         
-        [YamlMember(typeof(string), Alias = "timeout")]
+        [YamlMember(typeof(int), Alias = "timeout")]
         public int? Timeout { get; set; }
         
         [YamlMember(typeof(string), Alias = "wait")]
@@ -47,23 +51,25 @@ namespace TrustedUninstaller.Shared.Actions
         [YamlMember(typeof(bool), Alias = "exeDir")]
         public bool ExeDir { get; set; } = false;
         
+        [YamlMember(typeof(Dictionary<string, ExitCodeAction>), Alias = "handleExitCodes")]
+        [CanBeNull] public Dictionary<string, ExitCodeAction> HandleExitCodes { get; set; } = null;
+
         [YamlMember(typeof(string), Alias = "weight")]
         public int ProgressWeight { get; set; } = 1;
         
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => false;
 
         private bool InProgress { get; set; }
         public void ResetProgress() => InProgress = false;
 
         private int? ExitCode { get; set; }
 
-        public string? StandardError { get; set; }
-
-        public string StandardOutput { get; set; }
 
         public string ErrorString() => $"CmdAction failed to run command '{Command}'.";
         
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             if (InProgress)
             {
@@ -73,22 +79,28 @@ namespace TrustedUninstaller.Shared.Actions
             return ExitCode == null ? UninstallTaskStatus.ToDo: UninstallTaskStatus.Completed;
         }
         
-        public Task<bool> RunTask()
+        public Task<bool> RunTask(Output.OutputWriter output)
         {
             return null;
         }
 
-        private void RunAsProcess()
+        private void RunAsProcess(Output.OutputWriter output)
         {
-            var process = new Process();
+            using var process = new Process();
             var startInfo = new ProcessStartInfo
             {
                 WindowStyle = ProcessWindowStyle.Normal,
                 FileName = "cmd.exe",
                 Arguments = "/C " + $"\"{this.Command}\"",
                 UseShellExecute = false,
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
+                // .NET has a bug when the start command is used. Using WaitForExit() waits for the
+                // started process to exit, instead of just the original cmd.exe process. For some
+                // reason, using WaitForExit(timeout) does not have this same behavior, and returns
+                // after start finishes as expected. However, the output streams do not output null
+                // either until the started process exits, which is why an exception is made here.
+                // Same for .NET 8.0.
+                RedirectStandardError = !this.Command.StartsWith("start ", StringComparison.OrdinalIgnoreCase),
+                RedirectStandardOutput = !this.Command.StartsWith("start ", StringComparison.OrdinalIgnoreCase),
                 CreateNoWindow = true
             };
             if (ExeDir) startInfo.WorkingDirectory = AmeliorationUtil.Playbook.Path + "\\Executables";
@@ -101,75 +113,52 @@ namespace TrustedUninstaller.Shared.Actions
             }
                 
             process.StartInfo = startInfo;
-            process.Start();
-                
-            if (!Wait)
-            {
-                process.Dispose();
-                return;
-            }
             
-            var error = new StringBuilder();
-            process.OutputDataReceived += ProcOutputHandler;
-            process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs args)
+            using (var handler = new OutputHandler("Process", process, output))
             {
-                if (!String.IsNullOrEmpty(args.Data))
-                    error.AppendLine(args.Data);
+                handler.StartProcess(RunAs);
+             
+                if (!Wait)
+                {
+                    return;
+                }
+                
+                if (Timeout.HasValue)
+                {
+                    var exited = process.WaitForExit(Timeout.Value);
+                    if (!exited)
+                    {
+                        handler.CancelReading();
+                        process.Kill();
+                        throw new TimeoutException($"Command '{Command}' timeout exceeded.");
+                    }
+                }
                 else
-                    error.AppendLine();
-            };
-            
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
-            if (Timeout != null)
-            {
-                var exited = process.WaitForExit(Timeout.Value);
-                if (!exited)
                 {
-                    process.Kill();
-                    throw new TimeoutException($"Command '{Command}' timeout exceeded.");
-                }
-            }
-            else
-            {
-                bool exited = process.WaitForExit(30000);
+                    bool exited = process.WaitForExit(30000);
 
-                // WaitForExit alone seems to not be entirely reliable
-                while (!exited && CmdRunning(process.Id))
-                {
-                    exited = process.WaitForExit(30000);
+                    // WaitForExit alone seems to not be entirely reliable
+                    while (!exited && CmdRunning(process.Id))
+                    {
+                        exited = process.WaitForExit(30000);
+                    }
                 }
             }
             
-            int exitCode = 0;
-            try
-            {
-                exitCode = process.ExitCode;
-            }
-            catch (Exception ex)
-            {
-                ErrorLogger.WriteToErrorLog("Error fetching process exit code. (1)", null, "CmdAction Error", Command);
-            }
+            ExitCode = Wrap.ExecuteSafe(() => process.ExitCode, true, output.LogOptions).Value;
+            if (ExitCode != 0 && !Command.Contains("ProcessHacker\\x64\\ProcessHacker.exe"))
+                output.WriteLineSafe("Info", $"cmd instance exited with non-zero exit code: {ExitCode}");
             
-            if (exitCode != 0 && !Command.Contains("ProcessHacker\\x64\\ProcessHacker.exe"))
+            if (HandleExitCodes != null)
             {
-                StandardError = error.ToString();
-                Console.WriteLine($"cmd instance exited with error code: {exitCode}");
-                if (!String.IsNullOrEmpty(StandardError)) Console.WriteLine($"Error message: {StandardError}");
-                
-                ErrorLogger.WriteToErrorLog("Cmd exited with a non-zero exit code: " + exitCode, null, "CmdAction Error", Command);
-                
-                this.ExitCode = exitCode;
+                foreach (string key in HandleExitCodes.Keys)
+                {
+                    if (IsApplicableNumber(key, ExitCode.Value))
+                    {
+                        throw new ErrorHandlingException(HandleExitCodes[key], $"Command '{Command}' exit code {ExitCode.Value} handled with filter '{key}' --> {HandleExitCodes[key]}.");
+                    }
+                }
             }
-            else
-            {
-                ExitCode = 0;
-            }
-            
-            process.CancelOutputRead();
-            process.CancelErrorRead();
-            process.Dispose();
         }
         
         private static bool CmdRunning(int id)
@@ -184,10 +173,9 @@ namespace TrustedUninstaller.Shared.Actions
             }
         }
         
-        private void RunAsPrivilegedProcess()
+        private void RunAsPrivilegedProcess(Output.OutputWriter output)
         {
-            
-            var process = new AugmentedProcess.Process();
+            using var process = new AugmentedProcess.Process();
             var startInfo = new AugmentedProcess.ProcessStartInfo
             {
                 WindowStyle = ProcessWindowStyle.Normal,
@@ -208,95 +196,32 @@ namespace TrustedUninstaller.Shared.Actions
             }
                 
             process.StartInfo = startInfo;
-            ProcessPrivilege.StartPrivilegedTask(process, RunAs);
-                
-            if (!Wait)
+            
+            using (var handler = new OutputHandler("Process", process, output))
             {
-                process.Dispose();
-                return;
+                handler.StartProcess(RunAs);
+             
+                if (!Wait)
+                {
+                    return;
+                }
+                
+                if (Timeout.HasValue)
+                {
+                    var exited = process.WaitForExit(Timeout.Value);
+                    if (!exited)
+                    {
+                        handler.CancelReading();
+                        process.Kill();
+                        throw new TimeoutException($"Command '{Command}' timeout exceeded.");
+                    }
+                }
+                else process.WaitForExit();
             }
             
-            var error = new StringBuilder();
-            process.OutputDataReceived += PrivilegedProcOutputHandler;
-            process.ErrorDataReceived += delegate(object sender, AugmentedProcess.DataReceivedEventArgs args)
-            {
-                if (!String.IsNullOrEmpty(args.Data))
-                    error.AppendLine(args.Data);
-                else
-                    error.AppendLine();
-            };
-            
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
-            if (Timeout != null)
-            {
-                var exited = process.WaitForExit(Timeout.Value);
-                if (!exited)
-                {
-                    process.Kill();
-                    throw new TimeoutException($"Command '{Command}' timeout exceeded.");
-                }
-            }
-                
-            else process.WaitForExit();
-                
-
-            if (process.ExitCode != 0)
-            {
-                StandardError = error.ToString();
-                Console.WriteLine($"cmd instance exited with error code: {process.ExitCode}");
-                if (!String.IsNullOrEmpty(StandardError)) Console.WriteLine($"Error message: {StandardError}");
-                
-                ErrorLogger.WriteToErrorLog("Cmd exited with a non-zero exit code: " + process.ExitCode, null, "CmdAction Error", Command);
-                
-                this.ExitCode = process.ExitCode;
-            }
-            else
-            {
-                ExitCode = 0;
-            }
-            
-            process.CancelOutputRead();
-            process.CancelErrorRead();
-            process.Dispose();
-        }
-        
-        private void PrivilegedProcOutputHandler(object sendingProcess, AugmentedProcess.DataReceivedEventArgs outLine)
-        {
-            var outputString = outLine.Data;
-
-            // Collect the sort command output. 
-            if (!String.IsNullOrEmpty(outLine.Data))
-            {
-                if (outputString.Contains("\\AME"))
-                {
-                    outputString = outputString.Substring(outputString.IndexOf('>') + 1);
-                }
-                Console.WriteLine(outputString);
-            }
-            else
-            {
-                Console.WriteLine();
-            }
-        }
-        private void ProcOutputHandler(object sendingProcess, DataReceivedEventArgs outLine)
-        {
-            var outputString = outLine.Data;
-
-            // Collect the sort command output. 
-            if (!String.IsNullOrEmpty(outLine.Data))
-            {
-                if (outputString.Contains("\\AME"))
-                {
-                    outputString = outputString.Substring(outputString.IndexOf('>') + 1);
-                }
-                Console.WriteLine(outputString);
-            }
-            else
-            {
-                Console.WriteLine();
-            }
+            ExitCode = Wrap.ExecuteSafe(() => process.ExitCode, true, output.LogOptions).Value;
+            if (ExitCode != 0 && !Command.Contains("ProcessHacker\\x64\\ProcessHacker.exe"))
+                output.WriteLineSafe("Info", $"cmd instance exited with non-zero exit code: {ExitCode}");
         }
     }
 }

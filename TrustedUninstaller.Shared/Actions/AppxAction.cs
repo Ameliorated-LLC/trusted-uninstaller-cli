@@ -10,13 +10,14 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using Core;
 
 namespace TrustedUninstaller.Shared.Actions
 {
     // Integrate ame-assassin later
-    internal class AppxAction : TaskAction, ITaskAction
+    internal class AppxAction : Tasks.TaskAction, ITaskAction
     {
-        public void RunTaskOnMainThread() { throw new NotImplementedException(); }
+        public void RunTaskOnMainThread(Output.OutputWriter output) { throw new NotImplementedException(); }
         
         public enum AppxOperation
         {
@@ -47,6 +48,8 @@ namespace TrustedUninstaller.Shared.Actions
         [YamlMember(typeof(string), Alias = "weight")]
         public int ProgressWeight { get; set; } = 30;
         public int GetProgressWeight() => ProgressWeight;
+        public ErrorAction GetDefaultErrorAction() => Tasks.ErrorAction.Notify;
+        public bool GetRetryAllowed() => false;
         
         private bool InProgress { get; set; }
         public void ResetProgress() => InProgress = false;
@@ -61,19 +64,19 @@ namespace TrustedUninstaller.Shared.Actions
             return packageManager.FindPackages().FirstOrDefault(package => package.Id.Name == Name);
         }
         */
-        public UninstallTaskStatus GetStatus()
+        public UninstallTaskStatus GetStatus(Output.OutputWriter output)
         {
             if (InProgress) return UninstallTaskStatus.InProgress;
             return HasFinished ? UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo;
             //return GetPackage() == null ? UninstallTaskStatus.Completed : UninstallTaskStatus.ToDo;
         }
         private bool HasFinished = false;
-        public async Task<bool> RunTask()
+        public async Task<bool> RunTask(Output.OutputWriter output)
         {
             if (InProgress) throw new TaskInProgressException("Another Appx action was called while one was in progress.");
             InProgress = true;
 
-            Console.WriteLine($"Removing APPX {Type.ToString().ToLower()} '{Name}'...");
+            output.WriteLineSafe("Info", $"Removing APPX {Type.ToString().ToLower()} '{Name}'...");
             
             WinUtil.CheckKph();
 
@@ -94,7 +97,8 @@ namespace TrustedUninstaller.Shared.Actions
             {
                 psi.Arguments = $@"-ClearCache ""{Name}""";
             }
-            
+
+            this.outputWriter = output;
             
             var proc = Process.Start(psi);
             
@@ -111,9 +115,6 @@ namespace TrustedUninstaller.Shared.Actions
             {
                 exited = proc.WaitForExit(30000);
             }
-            
-            using (var log = new StreamWriter("Logs\\Packages.txt", true))
-                log.Write(output.ToString());
 
             HasFinished = true;
 
@@ -121,15 +122,13 @@ namespace TrustedUninstaller.Shared.Actions
             return true;
         }
 
-        private StringBuilder output = new StringBuilder("");
+        private Output.OutputWriter outputWriter = null;
         private void ProcOutputHandler(object sendingProcess, DataReceivedEventArgs outLine)
         {
-            var write = outLine.Data == null ? "" : outLine.Data;
-            output.Append(write + Environment.NewLine);
-
-            if (!write.Equals("Complete!")) Console.WriteLine(write);
+            if (!string.IsNullOrWhiteSpace(outLine.Data))
+                outputWriter.WriteLineSafe("Process", outLine.Data);
         }
-        
+
         private static bool ExeRunning(string name, int id)
         {
             try
