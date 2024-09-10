@@ -17,13 +17,29 @@ namespace TrustedUninstaller.Shared.Tasks
 {
     public abstract class TaskActionWithOutputProcessor : Tasks.TaskAction
     {
+        protected static bool ExeRunning(string name, int id)
+        {
+            try
+            {
+                return Process.GetProcessesByName(Path.GetFileNameWithoutExtension(name)).Any(x => x.Id == id);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+        
         protected class OutputHandler : IDisposable
         {
+            [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+            static extern uint GetOEMCP();            
+            
             private readonly SemaphoreSlim semaphore = new SemaphoreSlim(1, 1);
             private readonly OutputWriter writer;
             private readonly string name;
             private readonly Process process;
             private readonly AugmentedProcess.Process augmentedProcess;
+            private static readonly Encoding s_outputEncoding = Encoding.GetEncoding((int)GetOEMCP());
             
             public OutputHandler(string name, Process process, [NotNull] OutputWriter writer)
             {
@@ -36,9 +52,15 @@ namespace TrustedUninstaller.Shared.Tasks
                     ErrorEndReached.Set();
 
                 if (process.StartInfo.RedirectStandardOutput)
+                {
+                    process.StartInfo.StandardOutputEncoding = s_outputEncoding;
                     process.OutputDataReceived += WriteOutputSafe;
+                }
                 if (process.StartInfo.RedirectStandardError)
+                {
+                    process.StartInfo.StandardErrorEncoding = s_outputEncoding;
                     process.ErrorDataReceived += WriteErrorSafe;
+                }
             }
             public OutputHandler(string name, AugmentedProcess.Process process, [NotNull] OutputWriter writer)
             {
@@ -51,9 +73,15 @@ namespace TrustedUninstaller.Shared.Tasks
                     ErrorEndReached.Set();
 
                 if (process.StartInfo.RedirectStandardOutput)
+                {
+                    process.StartInfo.StandardOutputEncoding = s_outputEncoding;
                     process.OutputDataReceived += WriteOutputSafe;
+                }
                 if (process.StartInfo.RedirectStandardError)
+                {
+                    process.StartInfo.StandardErrorEncoding = s_outputEncoding;
                     process.ErrorDataReceived += WriteErrorSafe;
+                }
             }
             public void StartProcess(Privilege privilege = Privilege.TrustedInstaller)
             {

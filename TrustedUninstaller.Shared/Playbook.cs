@@ -95,6 +95,7 @@ namespace TrustedUninstaller.Shared
         public string[]? SupportedBuilds { get; set; }
         public Requirements.Requirement[] Requirements { get; set; } = new Requirements.Requirement[] {};
         public string? Git { get; set; }
+        public string? InstallGuide { get; set; }
         public string? DonateLink { get; set; }
         public string? Website { get; set; }
         public string? ProductCode { get; set; }

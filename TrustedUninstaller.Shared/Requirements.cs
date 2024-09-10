@@ -52,6 +52,10 @@ namespace TrustedUninstaller.Shared
             PluggedIn = 9,
             [XmlEnum("NoTweakware")]
             NoTweakware = 10,
+            [XmlEnum("FreshInstall")]
+            FreshInstall = 12,
+            [XmlEnum("UCPDDisabled")]
+            UCPDDisabled = 13,
         }
 
         public static async Task<Requirement[]> MetRequirements(this Requirement[] requirements, bool checkNoPendingUpdate = false)
@@ -81,15 +85,19 @@ namespace TrustedUninstaller.Shared
             if (requirements.Contains(Requirement.PluggedIn))
                 if (await new Battery().IsMet()) metRequirements.Add(Requirement.PluggedIn);
             
+            if (requirements.Contains(Requirement.FreshInstall))
+                if (await new FreshInstall().IsMet()) metRequirements.Add(Requirement.FreshInstall);
+            
             if (requirements.Contains(Requirement.NoPendingUpdates))
                 if (!checkNoPendingUpdate || (new [] {
-                        Requirement.Internet,
-                        Requirement.NoInternet,
-                        Requirement.PluggedIn,
-                        Requirement.DefenderDisabled
+                        Requirement.FreshInstall,
+                        Requirement.PluggedIn
                     }.All(metRequirements.Contains) &&
                     await new NoPendingUpdates().IsMet())) metRequirements.Add(Requirement.NoPendingUpdates);
 
+            if (requirements.Contains(Requirement.UCPDDisabled))
+                if (await new UCPDDisabled().IsMet()) metRequirements.Add(Requirement.UCPDDisabled);
+            
             if (requirements.Contains(Requirement.DefenderToggled))
                 if (await new DefenderDisabled().IsMet()) metRequirements.Add(Requirement.DefenderToggled);
 
@@ -392,6 +400,61 @@ namespace TrustedUninstaller.Shared
             }
 
             public Task<bool> Meet() => throw new NotImplementedException();
+        }
+        
+        public class FreshInstall : RequirementBase, IRequirements
+        {
+            public async Task<bool> IsMet()
+            {
+                try
+                {
+                    RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+                    if (key != null)
+                    {
+                        object installDateValue = key.GetValue("InstallDate");
+                        if (installDateValue != null)
+                        {
+                            int installDateUnix = (int)installDateValue;
+                            DateTime installDate = DateTimeOffset.FromUnixTimeSeconds(installDateUnix).DateTime;
+
+                            TimeSpan timeSinceInstall = DateTime.Now - installDate;
+
+                            if (timeSinceInstall.TotalHours > 40)
+                                return false;
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    Log.EnqueueExceptionSafe(e);
+                }
+                return true;
+            }
+
+            public async Task<bool> Meet() => throw new NotImplementedException();
+        }
+        public class UCPDDisabled : RequirementBase, IRequirements
+        {
+            public async Task<bool> IsMet()
+            {
+                try
+                {
+                    RegistryKey key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Services\UCPD");
+                    if (key != null)
+                    {
+                        int startValue= (int)key.GetValue("Start");
+                        if (startValue != 4)
+                            return false;
+                    }
+                }
+                catch (Exception e)
+                {
+                    Log.EnqueueExceptionSafe(e);
+                }
+                return true;
+            }
+
+            public async Task<bool> Meet() => throw new NotImplementedException();
         }
         
         public class WindowsBuild

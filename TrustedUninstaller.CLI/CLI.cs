@@ -99,7 +99,9 @@ namespace TrustedUninstaller.CLI
                     Console.WriteLine("Internet must be connected to run this Playbook.");
                 }
 
-                if (AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.DefenderDisabled) && Process.GetProcessesByName("MsMpEng").Any())
+                bool ucpdDisablePending = AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.UCPDDisabled) &&
+                                          !await new Requirements.UCPDDisabled().IsMet();
+                if (((AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.DefenderDisabled) || AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.DefenderToggled)) && Process.GetProcessesByName("MsMpEng").Any()) || ucpdDisablePending)
                 {
                     bool first = true;
 
@@ -110,36 +112,40 @@ namespace TrustedUninstaller.CLI
                         Console.ReadKey();
                     }
 
-                    bool remnantsOnly = false;
-
-                    Console.WriteLine(remnantsOnly
-                        ? "The system must be prepared before continuing.\r\nPress any key to continue..."
-                        : "The system must be prepared before continuing. Your system will restart after preparation\r\nPress any key to continue...");
-                    Console.ReadKey();
-                    try
+                    if ((AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.DefenderDisabled) && Process.GetProcessesByName("MsMpEng").Any()) ||
+                        ucpdDisablePending)
                     {
-                        Console.WriteLine("\r\nPreparing system...");
-                        await PrepareSystemCLI(false);
-                        Console.WriteLine("Preparation Complete");
+                        bool remnantsOnly = false;
 
-                        if (!remnantsOnly)
+                        Console.WriteLine(remnantsOnly
+                            ? "The system must be prepared before continuing.\r\nPress any key to continue..."
+                            : "The system must be prepared before continuing. Your system will restart after preparation\r\nPress any key to continue...");
+                        Console.ReadKey();
+                        try
                         {
-                            Console.WriteLine("\r\nRestarting system...");
-                            CmdAction reboot = new CmdAction()
+                            Console.WriteLine("\r\nPreparing system...");
+                            await PrepareSystemCLI(false, ucpdDisablePending, AmeliorationUtil.Playbook.Requirements.Contains(Requirements.Requirement.DefenderDisabled) && Process.GetProcessesByName("MsMpEng").Any());
+                            Console.WriteLine("Preparation Complete");
+
+                            if (!remnantsOnly)
                             {
-                                Command = "timeout /t 1 & shutdown /r /t 0",
-                                Wait = false
-                            };
+                                Console.WriteLine("\r\nRestarting system...");
+                                CmdAction reboot = new CmdAction()
+                                {
+                                    Command = "timeout /t 1 & shutdown /r /t 0",
+                                    Wait = false
+                                };
 
-                            Wrap.ExecuteSafe(() => reboot.RunTaskOnMainThread(Output.OutputWriter.Null));
+                                Wrap.ExecuteSafe(() => reboot.RunTaskOnMainThread(Output.OutputWriter.Null));
 
-                            Environment.Exit(0);
+                                Environment.Exit(0);
+                            }
                         }
-                    }
-                    catch (Exception e)
-                    {
-                        Console.WriteLine("Error preparing system: " + e.Message);
-                        Environment.Exit(-1);
+                        catch (Exception e)
+                        {
+                            Console.WriteLine("Error preparing system: " + e.Message);
+                            Environment.Exit(-1);
+                        }
                     }
                 }
 
@@ -249,7 +255,7 @@ namespace TrustedUninstaller.CLI
                 {
                     using (var progress = new InterLink.InterProgress(async value => { Console.WriteLine(value + "% " + status + "..."); }))
                     {
-                        errorsOccurred = await InterLink.ExecuteAsync(() => AmeliorationUtil.RunPlaybook(AmeliorationUtil.Playbook.Path, options.ToArray(),
+                        errorsOccurred = await InterLink.ExecuteAsync(() => AmeliorationUtil.RunPlaybook(AmeliorationUtil.Playbook.Path, AmeliorationUtil.Playbook.Name, AmeliorationUtil.Playbook.Version, options.ToArray(),
                             Environment.CurrentDirectory, progress, reporter, AmeliorationUtil.UseKernelDriver));
                     }
                 }
@@ -496,14 +502,22 @@ namespace TrustedUninstaller.CLI
             return result;
         }
 
-        public static async Task PrepareSystemCLI(bool KernelDriverOnly)
+        public static async Task PrepareSystemCLI(bool KernelDriverOnly, bool ucpdDisablePending, bool defenderDisablePending)
         {
             var status = "Adding certificate";
             using var progress = new InterLink.InterProgress(value => Console.WriteLine(value + "% " + status + "..."));
             using var messageReporter = new InterLink.InterMessageReporter(message => status = message);
             
-            var task = KernelDriverOnly ? InterLink.ExecuteAsync(() => Defender.DisableBlocklist()) : InterLink.ExecuteAsync(() => Defender.KillAndDisable(progress, messageReporter, false, true));
-            await task;
+            var workTask = KernelDriverOnly 
+                ? 
+                InterLink.ExecuteAsync(() => Defender.DisableBlocklist(progress, messageReporter, ucpdDisablePending))
+                : 
+                !defenderDisablePending
+                    ? 
+                    InterLink.ExecuteAsync(() => Defender.DisableUCPD(progress)) 
+                    : 
+                    InterLink.ExecuteAsync(() => Defender.KillAndDisable(progress, messageReporter, false, true));
+            await workTask;
         }
     }
 }

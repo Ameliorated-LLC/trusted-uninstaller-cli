@@ -63,8 +63,8 @@ namespace TrustedUninstaller.Shared
     {
         [DllImport("kernel32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool CreateProcess(
-            string lpApplicationName, string lpCommandLine, ref SECURITY_ATTRIBUTES lpProcessAttributes,
+        private static extern bool CreateProcessW(
+            string lpApplicationName, [MarshalAs(UnmanagedType.LPWStr)] string lpCommandLine, ref SECURITY_ATTRIBUTES lpProcessAttributes,
             ref SECURITY_ATTRIBUTES lpThreadAttributes, bool bInheritHandles, uint dwCreationFlags,
             IntPtr lpEnvironment, string lpCurrentDirectory, [In] ref STARTUPINFOEX lpStartupInfo,
             out PROCESS_INFORMATION lpProcessInformation);
@@ -155,7 +155,7 @@ namespace TrustedUninstaller.Shared
                 pSec.nLength = Marshal.SizeOf(pSec);
                 tSec.nLength = Marshal.SizeOf(tSec);
 
-                CreateProcess(null,
+                CreateProcessW(null,
                     $"\"{path}\"{(String.IsNullOrEmpty(arguments) ? null : " " + arguments)}",
                     ref pSec,
                     ref tSec,

@@ -222,6 +222,17 @@ namespace TrustedUninstaller.Shared.Actions
             ExitCode = Wrap.ExecuteSafe(() => process.ExitCode, true, output.LogOptions).Value;
             if (ExitCode != 0 && !Command.Contains("ProcessHacker\\x64\\ProcessHacker.exe"))
                 output.WriteLineSafe("Info", $"cmd instance exited with non-zero exit code: {ExitCode}");
+            
+            if (HandleExitCodes != null)
+            {
+                foreach (string key in HandleExitCodes.Keys)
+                {
+                    if (IsApplicableNumber(key, ExitCode.Value))
+                    {
+                        throw new ErrorHandlingException(HandleExitCodes[key], $"Command '{Command}' exit code {ExitCode.Value} handled with filter '{key}' --> {HandleExitCodes[key]}.");
+                    }
+                }
+            }
         }
     }
 }

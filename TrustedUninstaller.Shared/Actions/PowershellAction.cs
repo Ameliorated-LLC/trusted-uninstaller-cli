@@ -214,17 +214,16 @@ namespace TrustedUninstaller.Shared.Actions
             ExitCode = Wrap.ExecuteSafe(() => process.ExitCode, true, output.LogOptions).Value;
             if (ExitCode != 0)
                 output.WriteLineSafe("Info", $"PowerShell instance exited with error code: {ExitCode}");
-        }
-        
-        private static bool ExeRunning(string exe, int id)
-        {
-            try
+            
+            if (HandleExitCodes != null)
             {
-                return Process.GetProcessesByName(Path.GetFileNameWithoutExtension(exe)).Any(x => x.Id == id);
-            }
-            catch (Exception)
-            {
-                return false;
+                foreach (string key in HandleExitCodes.Keys)
+                {
+                    if (IsApplicableNumber(key, ExitCode.Value))
+                    {
+                        throw new ErrorHandlingException(HandleExitCodes[key], $"PowerShell command '{Command}' exit code {ExitCode.Value} handled with filter '{key}' --> {HandleExitCodes[key]}.");
+                    }
+                }
             }
         }
     }

@@ -15,8 +15,8 @@ namespace TrustedUninstaller.Shared
 {
     public class Globals
     {
-        public const string CurrentVersion = "0.7.5";
-        public const decimal CurrentVersionNumber = 0.75M;
+        public const string CurrentVersion = "0.7.6";
+        public const decimal CurrentVersionNumber = 0.76M;
     }
     [Serializable]
     public class WizardMetadata : Log.ILogMetadata

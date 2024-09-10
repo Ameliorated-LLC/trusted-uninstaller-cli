@@ -1,6 +1,7 @@
 ﻿#nullable enable
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Security;
@@ -37,7 +38,7 @@ namespace TrustedUninstaller.Shared.Actions
         REG_UNKNOWN = RegistryValueKind.Unknown
     }
 
-    public class RegistryValueAction : Tasks.TaskAction, ITaskAction
+    public class RegistryValueAction : TaskActionWithOutputProcessor, ITaskAction
     {
         public void RunTaskOnMainThread(Output.OutputWriter output) { throw new NotImplementedException(); }
         [YamlMember(typeof(string), Alias = "path")]
@@ -329,9 +330,75 @@ namespace TrustedUninstaller.Shared.Actions
                 catch (Exception e)
                 {
                     Log.WriteExceptionSafe(LogType.Warning, e, output.LogOptions);
+                    if (e is UnauthorizedAccessException)
+                    {
+                        try
+                        {
+                            var tempPath = Environment.ExpandEnvironmentVariables(@"%TEMP%\AME");
+                            var regPath = Environment.ExpandEnvironmentVariables(@"%SYSTEMROOT%\System32\reg.exe");
+                            var ameRegPath = Path.Combine(tempPath, "amereg.exe");
+                            if (File.Exists(regPath))
+                            {
+                                if (!Directory.Exists(tempPath))
+                                    Directory.CreateDirectory(tempPath);
+                                
+                                File.Copy(regPath, ameRegPath);
+                                
+                                RegAddValue(output, ameRegPath, root!.Name + "\\" + subKey, Value, Type, Data?.ToString() ?? null);
+                                
+                                File.Delete(ameRegPath);
+                            }
+                            else
+                            {
+                                output.WriteLineSafe("Info", "reg.exe not found, cannot try alternate method.");
+                            }
+                        }
+                        catch (Exception exception)
+                        {
+                            Log.WriteExceptionSafe(LogType.Warning, exception, output.LogOptions);
+                        }
+                    }
                 }
             }
             return true;
+        }
+
+        private void RegAddValue(Output.OutputWriter output, string exePath, string key, string value, RegistryValueType type, string? data)
+        {
+            var arguments = @$"add ""{key}"" /v ""{value}"" /t ""{type.ToString()}"" /d ""{data.ToString()}"" /f";
+            
+            var startInfo = new ProcessStartInfo
+            {
+                CreateNoWindow = false,
+                UseShellExecute = false,
+                WindowStyle = ProcessWindowStyle.Normal,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+                FileName = exePath,
+                Arguments = arguments,
+            };
+            using var process = new Process
+            {
+                StartInfo = startInfo,
+                EnableRaisingEvents = true
+            };
+
+            using (var handler = new OutputHandler("Process", process, output))
+            {
+                handler.StartProcess();
+
+                bool exited = process.WaitForExit(30000);
+
+                // WaitForExit alone seems to not be entirely reliable
+                while (!exited && ExeRunning(process.ProcessName, process.Id))
+                {
+                    exited = process.WaitForExit(30000);
+                }
+            }
+
+            int exitCode = Wrap.ExecuteSafe(() => process.ExitCode, true, output.LogOptions).Value;
+            if (exitCode != 0)
+                output.WriteLineSafe("Warning", $"Reg exited with a non-zero exit code: {exitCode}");
         }
     }
 }

@@ -279,17 +279,16 @@ namespace TrustedUninstaller.Shared.Actions
                 output.WriteLineSafe("Info", $"Process exited with a non-zero exit code: {exeProcess.ExitCode}");
 
             HasExited = true;
-        }
-        
-        private static bool ExeRunning(string name, int id)
-        {
-            try
+            
+            if (HandleExitCodes != null)
             {
-                return Process.GetProcessesByName(name).Any(x => x.Id == id);
-            }
-            catch (Exception)
-            {
-                return false;
+                foreach (string key in HandleExitCodes.Keys)
+                {
+                    if (IsApplicableNumber(key, exitCode))
+                    {
+                        throw new ErrorHandlingException(HandleExitCodes[key], $"Process '{Exe}' exit code {exitCode} handled with filter '{key}' --> {HandleExitCodes[key]}.");
+                    }
+                }
             }
         }
     }

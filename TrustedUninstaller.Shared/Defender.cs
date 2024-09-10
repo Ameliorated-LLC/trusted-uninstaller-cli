@@ -12,12 +12,14 @@ using System.Runtime.InteropServices;
 using System.Security.Principal;
 using System.ServiceProcess;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using Core;
 using Interprocess;
 using JetBrains.Annotations;
 using Microsoft.Win32;
 using Microsoft.Win32.SafeHandles;
+using Microsoft.Win32.TaskScheduler;
 
 namespace TrustedUninstaller.Shared
 {
@@ -140,8 +142,14 @@ namespace TrustedUninstaller.Shared
         }
         
         [InterprocessMethod(Level.Administrator)]
-        public static void DisableBlocklist()
+        public static void DisableBlocklist(InterLink.InterProgress progress, InterLink.InterMessageReporter reporter, bool UCPD)
         {
+            if (UCPD)
+                DisableUCPD(null);
+            
+            progress.Report(10);
+            Thread.Sleep(250);
+            
             try
             {
                 // Can cause ProcessHacker driver warnings without this
@@ -168,6 +176,10 @@ namespace TrustedUninstaller.Shared
                     != UninstallTaskStatus.Completed)
                     Log.EnqueueSafe(LogType.Warning, "Could not disable memory integrity.", new SerializableTrace());
             }
+            
+            progress.Report(60);
+            Thread.Sleep(250);
+            
             try
             {
                 // Can cause ProcessHacker driver warnings without this
@@ -194,6 +206,70 @@ namespace TrustedUninstaller.Shared
                     != UninstallTaskStatus.Completed)
                     Log.EnqueueSafe(LogType.Warning, "Could not disable blocklist.", new SerializableTrace());
             }
+            
+            progress.Report(100);
+        }
+        
+        [InterprocessMethod(Level.Administrator)]
+        public static void DisableUCPD([CanBeNull] InterLink.InterProgress progress)
+        {
+
+            try
+            {
+                using (TaskService ts = new TaskService())
+                {
+                    var task = ts.GetTask(@"\Microsoft\Windows\AppxDeploymentClient\UCPD velocity");
+                    if (task != null)
+                    {
+                        task.Definition.Settings.Enabled = false;
+                        task.Enabled = false;
+                        task.RegisterChanges();
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log.EnqueueExceptionSafe(e, "Failed to disable UCPD task.");
+            }
+            
+            if (progress != null)
+            {
+                progress.Report(10);
+                Thread.Sleep(250);
+            }
+            
+            try
+            {
+                new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\UCPD", Value = "Start", Data = 4, }.RunTask();
+
+                if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\UCPD", Value = "Start", Data = 4, }.GetStatus()
+                    != UninstallTaskStatus.Completed)
+                    throw new Exception("Unknown error");
+            }
+            catch (Exception e)
+            {
+                Log.EnqueueExceptionSafe(e, "First memory integrity disable failed.");
+
+                new RunAction()
+                {
+                    RawPath = Directory.GetCurrentDirectory(),
+                    Exe = $"NSudoLC.exe",
+                    Arguments =
+                        @"-U:T -P:E -M:S -ShowWindowMode:Hide -Priority:RealTime -Wait reg add ""HKLM\SYSTEM\CurrentControlSet\Services\UCPD"" /v Start /d 4 /f",
+                    CreateWindow = false
+                }.RunTask();
+
+                if (new RegistryValueAction() { KeyName = @"HKLM\SYSTEM\CurrentControlSet\Services\UCPD", Value = "Start", Data = 4, }.GetStatus()
+                    != UninstallTaskStatus.Completed)
+                    Log.EnqueueSafe(LogType.Warning, "Could not disable memory integrity.", new SerializableTrace());
+            }
+            
+            if (progress != null)
+            {
+                progress.Report(80);
+                Thread.Sleep(250);
+                progress.Report(100);
+            }
         }
 
         [InterprocessMethod(Level.Administrator)]
@@ -204,11 +280,15 @@ namespace TrustedUninstaller.Shared
                 if (!forceSafeBoot)
                 {
                     Thread.Sleep(250);
+                    reporter.Report("Disabling UCPD...");
+                    DisableUCPD(null);
+                    Thread.Sleep(350);
+                    progress.Report(2);
                     reporter.Report("Extracting service package...");
                     string cabPath = null;
 
                     cabPath = ExtractCab();
-                    progress.Report(2);
+                    progress.Report(4);
 
                     reporter.Report("Adding certificate...");
                     var certPath = Path.GetTempFileName();
@@ -318,6 +398,10 @@ namespace TrustedUninstaller.Shared
                 {
                     Thread.Sleep(250);
                     progress.Report(2);
+                    reporter.Report("Disabling UCPD...");
+                    DisableUCPD(null);
+                    Thread.Sleep(350);
+                    progress.Report(4);
 
                     reporter.Report("Adding service...");
                     Thread.Sleep(500);
@@ -511,7 +595,7 @@ namespace TrustedUninstaller.Shared
             }
             
             Assembly assembly = Assembly.GetEntryAssembly();
-            using (UnmanagedMemoryStream stream = (UnmanagedMemoryStream)assembly!.GetManifestResourceStream($"TrustedUninstaller.CLI.Properties.Z-AME-NoDefender-Package31bf3856ad364e35{cabArch}1.0.0.0.cab"))
+            using (UnmanagedMemoryStream stream = (UnmanagedMemoryStream)assembly!.GetManifestResourceStream($"TrustedUninstaller.GUI.Resources.Z-AME-NoDefender-Package31bf3856ad364e35{cabArch}1.0.0.0.cab"))
             {
                 byte[] buffer = new byte[stream!.Length];
                 stream.Read(buffer, 0, buffer.Length);
@@ -1082,4 +1166,3 @@ namespace TrustedUninstaller.Shared
         }
     }
 }
-

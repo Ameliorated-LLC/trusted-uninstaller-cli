@@ -311,9 +311,7 @@ namespace TrustedUninstaller.Shared
                                         if (errorHandlingException.Action == TaskAction.ExitCodeAction.RetryError)
                                         {
                                             i = 0;
-                                            Log.WriteExceptionSafe(e, errorHandlingException.Message, new Log.LogOptions(writer));
-                                            errorOccurred = true;
-                                            break;
+                                            throw errorHandlingException;
                                         }
                                     }
                                     continue;
@@ -429,7 +427,7 @@ namespace TrustedUninstaller.Shared
         [Serializable]
         public class PlaybookMetadata : Log.ILogMetadata
         {
-            public PlaybookMetadata(string[] options) => Options = options;
+            public PlaybookMetadata(string[] options, string playbookName, string playbookVersion) => (Options, Playbook, Version) = (options, playbookName, playbookVersion);
          
             public DateTime CreationTime { get; set; }
             public string ClientVersion { get; set; }
@@ -438,6 +436,9 @@ namespace TrustedUninstaller.Shared
             public Architecture Architecture { get; set; }
             public string SystemMemory { get; set; }
             public int SystemThreads { get; set; }
+            // ReSharper disable once MemberHidesStaticFromOuterClass
+            public string Playbook { get; set; }
+            public string Version { get; set; }
             public string[] Options { get; set; }
             public virtual void Construct()
             {
@@ -454,10 +455,11 @@ namespace TrustedUninstaller.Shared
         }
         
         [InterprocessMethod(Level.TrustedInstaller)]
-        public static async Task<bool> RunPlaybook(string playbookPath, string[] options, string logFolder, InterLink.InterProgress progress, [CanBeNull] InterLink.InterMessageReporter statusReporter, bool useKernelDriver)
+        public static async Task<bool> RunPlaybook(string playbookPath, string playbookName, string playbookVersion, string[] options, string logFolder, InterLink.InterProgress progress, [CanBeNull] InterLink.InterMessageReporter statusReporter, bool useKernelDriver)
         {
             Log.LogFileOverride = Path.Combine(logFolder, "Log.yml");
-            Log.MetadataSource = new PlaybookMetadata(options);
+            Log.MetadataSource = new PlaybookMetadata(options, playbookName, playbookVersion);
+            //Log.WriteMetadata(Path.Combine(logFolder, "Log.yml"));
 
             AmeliorationUtil.UseKernelDriver = useKernelDriver;
 

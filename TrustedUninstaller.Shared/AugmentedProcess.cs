@@ -1096,9 +1096,7 @@ namespace TrustedUninstaller.Shared
                     default:
                         environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                         {
-                            {"SuSSY", "gussys"},
-                            {"AMoGus", "gussys"},
-                            {"Sussex", "gussys"}
+                            {"Test", "Example"},
                         };
 
                         StringBuilder result = new StringBuilder();
