@@ -23,6 +23,33 @@ Core functionality used by AME Wizard.
    TrustedUninstaller.CLI.exe "AME 11 v0.7" browser-firefox enhanced-security
    ```
 
+## Running the Wizard Offline
+
+To run the AME Wizard without an internet connection, follow these steps:
+
+1. Ensure you have downloaded the required dependencies beforehand using the pre-download script (see below).
+
+2. Follow the steps in the CLI Usage section above to set up the AME Wizard.
+
+3. When running the wizard, it will check for an internet connection. If not connected, it will provide a warning and proceed with limited functionality.
+
+## Using the Pre-Download Script
+
+To pre-download the required dependencies for running the AME Wizard offline, follow these steps:
+
+1. Download the pre-download script from the [latest release](https://github.com/Ameliorated-LLC/trusted-uninstaller-cli/releases/latest).
+
+2. Extract the downloaded archive.
+
+3. Open **Command Prompt** as administrator and navigate to the extracted folder.
+
+4. Run the pre-download script:
+   ```
+   pre-download-script.bat
+   ```
+
+5. The script will download the required dependencies and save them in the appropriate folder for offline use.
+
 ## Compilation
 
 1. Clone the repository

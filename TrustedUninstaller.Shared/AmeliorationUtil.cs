@@ -48,7 +48,7 @@ namespace TrustedUninstaller.Shared
 
         public static int GetProgressMaximum(List<ITaskAction> actions) => actions.Sum(action => action.GetProgressWeight());
 
-        private static bool IsApplicable([CanBeNull] Playbook upgradingFrom, bool? onUpgrade, [CanBeNull] string[] onUpgradeVersions, [CanBeNull] string option)
+        private static bool IsApplicable([CanBeNull] Playbook upgradingFrom, bool? onUpgrade, [CanBeNull] string[] onUpgradeVersions, [CanBeNull] string option, bool internetConnected)
         {
             if (upgradingFrom == null)
                 return !onUpgrade.GetValueOrDefault();
@@ -83,7 +83,7 @@ namespace TrustedUninstaller.Shared
         }
         
         [CanBeNull]
-        public static List<ITaskAction> ParseActions(string configPath, List<string> options, string file, [CanBeNull] Playbook upgradingFrom)
+        public static List<ITaskAction> ParseActions(string configPath, List<string> options, string file, [CanBeNull] Playbook upgradingFrom, bool internetConnected)
         {
             var returnExceptionMessage = string.Empty;
             try
@@ -94,7 +94,7 @@ namespace TrustedUninstaller.Shared
                 var configData = File.ReadAllText(Path.Combine(configPath, file));
                 var task = PlaybookParser.Deserializer.Deserialize<UninstallTask>(configData);
 
-                if ((!IsApplicable(upgradingFrom, task.OnUpgrade, task.OnUpgradeVersions, task.PreviousOption ?? task.Option) || 
+                if ((!IsApplicable(upgradingFrom, task.OnUpgrade, task.OnUpgradeVersions, task.PreviousOption ?? task.Option, internetConnected) || 
                         !IsApplicableOption(task.Option, Playbook.Options) || !IsApplicableArch(task.Arch)) ||
                     (task.Builds != null && (
                         !task.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
@@ -113,7 +113,7 @@ namespace TrustedUninstaller.Shared
                 // ReSharper disable once PossibleInvalidCastExceptionInForeachLoop
                 foreach (Tasks.TaskAction taskAction in task.Actions)
                 {
-                    if ((!IsApplicable(upgradingFrom, taskAction.OnUpgrade, taskAction.OnUpgradeVersions, taskAction.PreviousOption ?? taskAction.Option) || 
+                    if ((!IsApplicable(upgradingFrom, taskAction.OnUpgrade, taskAction.OnUpgradeVersions, taskAction.PreviousOption ?? taskAction.Option, internetConnected) || 
                             !IsApplicableOption(taskAction.Option, options) || !IsApplicableArch(taskAction.Arch)) ||
                         (taskAction.Builds != null && (
                             !taskAction.Builds.Where(build => !build.StartsWith("!")).Any(build => IsApplicableWindowsVersion(build))
@@ -133,7 +133,7 @@ namespace TrustedUninstaller.Shared
                             throw new FileNotFoundException("Could not find YAML file: " + taskTaskAction.Path);
                         try
                         {
-                            list.AddRange(ParseActions(configPath, options, taskTaskAction.Path, upgradingFrom) ?? new List<ITaskAction>());
+                            list.AddRange(ParseActions(configPath, options, taskTaskAction.Path, upgradingFrom, internetConnected) ?? new List<ITaskAction>());
                         }
                         catch (Exception e)
                         {
@@ -155,7 +155,7 @@ namespace TrustedUninstaller.Shared
                         throw new FileNotFoundException("Could not find YAML file: " + childTask);
                     try
                     {
-                        list.AddRange(ParseActions(configPath, options, childTask, upgradingFrom) ?? new List<ITaskAction>());
+                        list.AddRange(ParseActions(configPath, options, childTask, upgradingFrom, internetConnected) ?? new List<ITaskAction>());
                     }
                     catch (Exception e)
                     {
@@ -229,7 +229,7 @@ namespace TrustedUninstaller.Shared
                         sb.Append(Environment.NewLine).Append(prefix + text);
                     } else if (currentLine == yamlEx.End.Line)
                     {
-                        var text = string.Join(Environment.NewLine + prefix.Length, line.Substring(0, yamlEx.End.Column).SplitByLength(25).Select(x => x.Trim()));
+                        var text = string.join(Environment.NewLine + prefix.Length, line.Substring(0, yamlEx.End.Column).SplitByLength(25).Select(x => x.Trim()));
                         sb.Append(Environment.NewLine).Append(prefix + text);
                         break;
                     }
@@ -443,7 +443,7 @@ namespace TrustedUninstaller.Shared
             public virtual void Construct()
             {
                 ClientVersion = Globals.CurrentVersion;
-                WindowsVersion = $"Windows {Win32.SystemInfoEx.WindowsVersion.MajorVersion} {Win32.SystemInfoEx.WindowsVersion.Edition} {Win32.SystemInfoEx.WindowsVersion.BuildNumber}.{Win32.SystemInfoEx.WindowsVersion.UpdateNumber}";
+                WindowsVersion = $"Windows {Win32.SystemInfoEx.WindowsVersion.MajorVersion} {Win32.SystemInfoEx.WindowsVersion.BuildNumber}.{Win32.SystemInfoEx.WindowsVersion.UpdateNumber}";
                 UserLanguage = CultureInfo.InstalledUICulture.ToString();
                 SystemMemory = StringUtils.HumanReadableBytes(Win32.SystemInfoEx.GetSystemMemoryInBytes());
                 SystemThreads = Environment.ProcessorCount;
@@ -455,7 +455,7 @@ namespace TrustedUninstaller.Shared
         }
         
         [InterprocessMethod(Level.TrustedInstaller)]
-        public static async Task<bool> RunPlaybook(string playbookPath, string playbookName, string playbookVersion, string[] options, string logFolder, InterLink.InterProgress progress, [CanBeNull] InterLink.InterMessageReporter statusReporter, bool useKernelDriver)
+        public static async Task<bool> RunPlaybook(string playbookPath, string playbookName, string playbookVersion, string[] options, string logFolder, InterLink.InterProgress progress, [CanBeNull] InterLink.InterMessageReporter statusReporter, bool useKernelDriver, bool internetConnected)
         {
             Log.LogFileOverride = Path.Combine(logFolder, "Log.yml");
             Log.MetadataSource = new PlaybookMetadata(options, playbookName, playbookVersion);
@@ -471,7 +471,7 @@ namespace TrustedUninstaller.Shared
             if (upgradingFrom != null && (!Playbook.IsUpgradeApplicable(upgradingFrom.Version) && !(upgradingFrom.GetVersionNumber() <= Playbook.GetVersionNumber())))
                 upgradingFrom = null;
             
-            List<ITaskAction> actions = ParseActions($"{Playbook.Path}\\Configuration", AmeliorationUtil.Playbook.Options, File.Exists($"{Playbook.Path}\\Configuration\\main.yml")  ? "main.yml" :  "custom.yml", upgradingFrom);
+            List<ITaskAction> actions = ParseActions($"{Playbook.Path}\\Configuration", AmeliorationUtil.Playbook.Options, File.Exists($"{Playbook.Path}\\Configuration\\main.yml")  ? "main.yml" :  "custom.yml", upgradingFrom, internetConnected);
             if (actions == null)
                 throw new SerializationException("No applicable tasks were found in the Playbook.");
             
@@ -827,4 +827,3 @@ namespace TrustedUninstaller.Shared
             return negative ? !result : result;
         }
     }
-}
