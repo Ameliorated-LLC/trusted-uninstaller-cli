@@ -146,7 +146,7 @@ namespace TrustedUninstaller.Shared
                 public Int32 BatteryLifeTime;
                 public Int32 BatteryFullLifeTime;
 
-                // direct instantation not intended, use GetPowerState.
+                // direct instantiation not intended, use GetPowerState.
                 private PowerState() {}
 
                 public static PowerState GetPowerState()

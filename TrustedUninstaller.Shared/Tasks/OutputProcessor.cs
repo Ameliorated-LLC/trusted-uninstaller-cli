@@ -195,9 +195,9 @@ namespace TrustedUninstaller.Shared.Tasks
                     Log.EnqueueSafe(LogType.Warning, "Error processing did not finish after cancel.", new SerializableTrace(), writer.LogOptions);
             }
 
-            private IDisposable TryLock(int timout = Timeout.Infinite)
+            private IDisposable TryLock(int timeout = Timeout.Infinite)
             {
-                if (!semaphore.Wait(timout))
+                if (!semaphore.Wait(timeout))
                     return null;
                 return new Releaser(semaphore);
             }
@@ -579,11 +579,11 @@ namespace TrustedUninstaller.Shared.Tasks
                 "%",
             };
 
-            private static readonly string[] DefinitePreceedingIndicators =
+            private static readonly string[] DefinitePrecedingIndicators =
                 { };
 
             // Must be sorted by length
-            private static readonly string[] PreceedingIndicators =
+            private static readonly string[] PrecedingIndicators =
             {
                 "|",
             };
@@ -592,7 +592,7 @@ namespace TrustedUninstaller.Shared.Tasks
             private static readonly char[] ProgressChars = { '>', '#', '=', '*', '.', '\u2593', '\u25a0', '\u25a0', '\u258f', '\u258e', '\u258d', '\u258c', '\u258b', '\u258a', '\u2589', '\u2588' };
             private static readonly char[] ReplaceableChars = { '-', ' ', '\u2592', '\u25a2', '\u25a1' };
 
-            private static readonly char[] PreceedingWrapChars = { ' ', '\n', '\r', '(', '[', ':' };
+            private static readonly char[] PrecedingWrapChars = { ' ', '\n', '\r', '(', '[', ':' };
             private static readonly char[] ProceedingWrapChars = { ' ', '\n', '\r', ')', ']', ':' };
 
             private class ProgressItem
@@ -655,7 +655,7 @@ namespace TrustedUninstaller.Shared.Tasks
                         }
 
                         var proceeding = text.Substring(parseIndex, text.Length - parseIndex);
-                        var preceeding = text.Substring(0, i);
+                        var preceding = text.Substring(0, i);
 
                         string proceedingIndicator = null;
 
@@ -681,9 +681,9 @@ namespace TrustedUninstaller.Shared.Tasks
                         }
                         else if ((proceedingIndicator = DefiniteProceedingIndicators.FirstOrDefault(x => proceeding.StartsWith(x))) != null)
                             ProgressItems.Add(new ProgressItem(true, text.Substring(i, parseIndex - i).Replace(',', '.'), ProgressExcludedChars.Count, proceedingIndicator));
-                        else if (DefinitePreceedingIndicators.Any(x => preceeding.EndsWith(x)))
+                        else if (DefinitePrecedingIndicators.Any(x => preceding.EndsWith(x)))
                             ProgressItems.Add(new ProgressItem(true, text.Substring(i, parseIndex - i).Replace(',', '.'), ProgressExcludedChars.Count, null));
-                        else if ((proceeding.Length == 0 || ProceedingWrapChars.Contains(proceeding[0]) || (proceedingIndicator = ProceedingIndicators.FirstOrDefault(x => proceeding.StartsWith(x) && (proceeding.Length == x.Length || ProceedingWrapChars.Contains(proceeding[x.Length])))) != null) && (preceeding.Length == 0 || PreceedingWrapChars.Contains(preceeding.Last()) || PreceedingIndicators.Any(x => preceeding.EndsWith(x) && (preceeding.Length == x.Length || PreceedingWrapChars.Contains(preceeding[(preceeding.Length - 1) - x.Length])))))
+                        else if ((proceeding.Length == 0 || ProceedingWrapChars.Contains(proceeding[0]) || (proceedingIndicator = ProceedingIndicators.FirstOrDefault(x => proceeding.StartsWith(x) && (proceeding.Length == x.Length || ProceedingWrapChars.Contains(proceeding[x.Length])))) != null) && (preceding.Length == 0 || PrecedingWrapChars.Contains(preceding.Last()) || PrecedingIndicators.Any(x => preceding.EndsWith(x) && (preceding.Length == x.Length || PrecedingWrapChars.Contains(preceding[(preceding.Length - 1) - x.Length])))))
                             ProgressItems.Add(new ProgressItem(true, text.Substring(i, parseIndex - i).Replace(',', '.'), ProgressExcludedChars.Count, proceedingIndicator));
 
 
@@ -745,8 +745,8 @@ namespace TrustedUninstaller.Shared.Tasks
                             {
                                 continueLoop = true;
 
-                                var internalPreceeding = text.Substring(0, i);
-                                if (!(internalPreceeding.Length == 0 || PreceedingWrapChars.Contains(internalPreceeding.Last()) || PreceedingIndicators.Any(x => internalPreceeding.EndsWith(x) && (internalPreceeding.Length == x.Length || PreceedingWrapChars.Contains(internalPreceeding[(internalPreceeding.Length - 1) - x.Length])))))
+                                var internalPreceding = text.Substring(0, i);
+                                if (!(internalPreceding.Length == 0 || PrecedingWrapChars.Contains(internalPreceding.Last()) || PrecedingIndicators.Any(x => internalPreceding.EndsWith(x) && (internalPreceding.Length == x.Length || PrecedingWrapChars.Contains(internalPreceding[(internalPreceding.Length - 1) - x.Length])))))
                                     break;
 
                                 var progressCharEnd = parseIndex;
@@ -859,10 +859,10 @@ namespace TrustedUninstaller.Shared.Tasks
                         }
 
                         var proceeding = text.Substring(parseIndex, text.Length - parseIndex);
-                        var preceeding = text.Substring(0, i);
+                        var preceding = text.Substring(0, i);
 
                         string proceedingIndicator = null;
-                        if ((proceeding.Length == 0 || ProceedingWrapChars.Contains(proceeding[0]) || (proceedingIndicator = ProceedingIndicators.FirstOrDefault(x => proceeding.StartsWith(x) && (proceeding.Length == x.Length || ProceedingWrapChars.Contains(proceeding[x.Length])))) != null) && (preceeding.Length == 0 || PreceedingWrapChars.Contains(preceeding.Last()) || PreceedingIndicators.Any(x => preceeding.EndsWith(x) && (preceeding.Length == x.Length || PreceedingWrapChars.Contains(preceeding[(preceeding.Length - 1) - x.Length])))))
+                        if ((proceeding.Length == 0 || ProceedingWrapChars.Contains(proceeding[0]) || (proceedingIndicator = ProceedingIndicators.FirstOrDefault(x => proceeding.StartsWith(x) && (proceeding.Length == x.Length || ProceedingWrapChars.Contains(proceeding[x.Length])))) != null) && (preceding.Length == 0 || PrecedingWrapChars.Contains(preceding.Last()) || PrecedingIndicators.Any(x => preceding.EndsWith(x) && (preceding.Length == x.Length || PrecedingWrapChars.Contains(preceding[(preceding.Length - 1) - x.Length])))))
                         {
                             var value = text.Substring(i, parseIndex - i);
 
