@@ -224,12 +224,6 @@
     <EmbeddedResource Include="Properties\uefi-ntfs-ame.img" />
   </ItemGroup>
   <ItemGroup>
-    <EmbeddedResource Include="Properties\oobe_shim.exe" />
-  </ItemGroup>
-  <ItemGroup>
-    <EmbeddedResource Include="Properties\AME.Client.exe" />
-  </ItemGroup>
-  <ItemGroup>
     <Content Include="7z.dll">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>

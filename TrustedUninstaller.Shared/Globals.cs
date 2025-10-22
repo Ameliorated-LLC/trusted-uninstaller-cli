@@ -15,7 +15,7 @@ namespace TrustedUninstaller.Shared
 {
     public class Globals
     {
-        public const string CurrentVersion = "0.8.1";
+        public const string CurrentVersion = "0.8.2";
         public static readonly VersionNumber CurrentVersionNumber = VersionNumber.GetVersionNumber(CurrentVersion);
     }
     [Serializable]
