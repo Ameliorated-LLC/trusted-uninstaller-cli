@@ -647,7 +647,7 @@ namespace Interprocess
                                     break;
                                 default:
                                     Wrap.ExecuteSafe(() => serverPipe.Disconnect());
-                                    Log.EnqueueSafe(LogType.Warning, "Unkown verification request type received.", null, null, ("Request Type", request.Type), ("Request Caller", request.CallerLevel));
+                                    Log.EnqueueSafe(LogType.Warning, "Unknown verification request type received.", null, null, ("Request Type", request.Type), ("Request Caller", request.CallerLevel));
                                     continue;
                             }
 

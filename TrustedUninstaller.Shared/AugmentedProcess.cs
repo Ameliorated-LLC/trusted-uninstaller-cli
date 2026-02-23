@@ -510,7 +510,7 @@ namespace TrustedUninstaller.Shared
                 handle.Close();
             }
             /// <devdoc>
-            ///     This is called from the threadpool when a proces exits.
+            ///     This is called from the threadpool when a process exits.
             /// </devdoc>
             /// <internalonly/>
             private void CompletionCallback(object context, bool wasSignaled)
@@ -942,7 +942,7 @@ namespace TrustedUninstaller.Shared
                             startupInfo.dwFlags = NativeMethods.STARTF_USESTDHANDLES;
                         }
 
-                        // set up the creation flags paramater
+                        // set up the creation flags parameter
                         int creationFlags = 0;
                         if (startInfo.CreateNoWindow) creationFlags |= NativeMethods.CREATE_NO_WINDOW;
 
@@ -1434,7 +1434,7 @@ namespace TrustedUninstaller.Shared
                             break;
                         case NativeMethods.WAIT_FAILED:
                         default:
-                            throw new InvalidOperationException("InputIdleUnkownError");
+                            throw new InvalidOperationException("InputIdleUnknownError");
                     }
                 }
                 finally
@@ -1477,7 +1477,7 @@ namespace TrustedUninstaller.Shared
                 }
                 if (pendingOutputRead) throw new InvalidOperationException("PendingAsyncOperation");
                 pendingOutputRead = true;
-                // We can't detect if there's a pending sychronous read, tream also doesn't.
+                // We can't detect if there's a pending synchronous read, tream also doesn't.
                 if (output == null)
                 {
                     if (standardOutput == null)
@@ -1513,7 +1513,7 @@ namespace TrustedUninstaller.Shared
                     throw new InvalidOperationException("PendingAsyncOperation");
                 }
                 pendingErrorRead = true;
-                // We can't detect if there's a pending sychronous read, stream also doesn't.
+                // We can't detect if there's a pending synchronous read, stream also doesn't.
                 if (error == null)
                 {
                     if (standardError == null)
@@ -2266,7 +2266,7 @@ namespace TrustedUninstaller.Shared
             public const int ERROR_IO_INCOMPLETE = 996;
             public const int ERROR_IO_PENDING = 997;
             public const int ERROR_FILE_EXISTS = 0x50;
-            public const int ERROR_FILENAME_EXCED_RANGE = 0xCE; // filename too long.
+            public const int ERROR_FILENAME_EXCEED_RANGE = 0xCE; // filename too long.
             public const int ERROR_MORE_DATA = 234;
             public const int ERROR_CANCELLED = 1223;
             public const int ERROR_FILE_NOT_FOUND = 2;
@@ -2554,7 +2554,7 @@ namespace TrustedUninstaller.Shared
                 {
                     bLastCarriageReturn = true;
                 }
-                // Keep the rest characaters which can't form a new line in string builder.
+                // Keep the rest characters which can't form a new line in string builder.
                 if (lineStart < len)
                 {
                     if (lineStart == 0)

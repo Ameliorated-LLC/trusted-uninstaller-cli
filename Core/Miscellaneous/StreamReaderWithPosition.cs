@@ -198,7 +198,7 @@ namespace Core.Miscellaneous
                 }
 
                 // Check for preamble before detect encoding. This is not to override the
-                // user suppplied Encoding for the one we implicitly detect. The user could
+                // user supplied Encoding for the one we implicitly detect. The user could
                 // customize the encoding which we will loose, such as ThrowOnError on UTF8
                 if (IsPreamble())
                     continue;
